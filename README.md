@@ -34,7 +34,7 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
 - `KEY0`-`KEY3` simulated button presses
-- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`), a heuristic probe for where logged data ends and erased flash begins (`FindHistoryEndAsync`), and a best-effort decoder for the observed timestamp/marker/reading log format (`GmcHistoryParser`)
+- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`), a heuristic probe for where logged data ends and erased flash begins (`FindHistoryEndAsync`, or `FindHistoryEndFastAsync` to bisect for it in ~13 reads instead of walking the log), a best-effort decoder for the observed timestamp/marker/reading log format (`GmcHistoryParser`), and direct access to the newest readings without paging the whole buffer (`GetRecentHistoryAsync`)
 - RFC1201 heartbeat (`HEARTBEAT1` / `HEARTBEAT0`)
 - Continuous CPS stream
 - Raw command access (`SendRawAsync`)
@@ -111,6 +111,25 @@ foreach (var entry in result.Entries)
 
 `GmcHistoryParser` decodes the `55 AA`-prefixed timestamp/marker scheme observed on real hardware into `GmcHistoryTimestamp`, `GmcHistoryMarker`, and `GmcHistoryReading` entries, and deliberately stops at any unrecognized marker type rather than guess a payload length - the rest of the buffer comes back as `result.UnparsedRemainder` for you to fetch more of and re-parse (prepending the remainder to the next chunk, since a marker can straddle a 4096-byte chunk boundary).
 
+### Reading just the newest readings
+
+The protocol offers no way to ask how many entries the log holds or where the last one is - there is no entry count, no write pointer, and no history-erase command; `SPIR` only does raw addressed reads. But you don't have to page through the whole buffer to reach the recent data:
+
+```csharp
+var recent = await gmc.GetRecentHistoryAsync(100);
+
+Console.WriteLine($"Write pointer: 0x{recent.HistoryEndAddress:X6}");
+foreach (var entry in recent.Entries)
+    Console.WriteLine(entry);
+```
+
+This bisects for the write pointer (the log is written sequentially with erased flash after it, so "is this region erased?" is monotonic in the address), then reads backward from it and resynchronizes on a `55 AA` anchor, since a window opening mid-log may start partway through an entry.
+
+Two things it deliberately does **not** assume:
+
+- **How many readings sit between anchors.** A device restart writes an extra anchor and an interrupted session ends a batch early - both observed on real hardware, where batches of 180, 141 and even 0 readings all appear - so the byte count for N readings can't be computed up front. The window is grown backward until enough readings turn up.
+- **That the buffer hasn't wrapped.** Bisection needs the "data then erased" invariant, so the tail is probed first and `null` is returned rather than bisecting if it isn't erased. A full or wrapped buffer therefore yields no answer instead of a confidently wrong one - wrap behavior is still untested, see [BACKLOG.md](BACKLOG.md).
+
 **Real hardware example.** Against an actual GMC-320S, `FindHistoryEndAsync()` returned `0x01A3B7` (107447) quickly — nowhere near the full 1MB scan bound — and the first 16 bytes read from address 0 were:
 
 ```
@@ -139,7 +158,15 @@ dotnet run --project .\src\Gmc320s.Console -- COM5
 
 # Also simulate pressing a physical button (0-3) before starting the live CPS stream
 dotnet run --project .\src\Gmc320s.Console -- COM5 --key 0
+
+# Show more of the newest readings (default 100) - reads only the tail of the log
+dotnet run --project .\src\Gmc320s.Console -- COM5 --recent 300
+
+# Additionally walk the entire log and print every timestamp (one read per 4096 bytes, so slow)
+dotnet run --project .\src\Gmc320s.Console -- COM5 --full-scan
 ```
+
+The app pauses on `Press any key to exit...` before closing, so the window stays open when launched from a debugger or by double-clicking the exe. It skips the pause automatically when input is redirected, so pipes and CI are unaffected.
 
 ## NuGet packaging
 

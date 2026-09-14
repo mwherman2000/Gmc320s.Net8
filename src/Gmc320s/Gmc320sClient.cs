@@ -141,10 +141,19 @@ public sealed class Gmc320sClient : IDisposable
         => await ExecuteAsync(() => Convert.ToHexString(_connection.Command("GETSERIAL", 7)), cancellationToken);
 
     /// <summary>Powers the device off. The device does not acknowledge this command.</summary>
+    /// <remarks>
+    /// Observed on real hardware: the device cannot actually be powered off while USB is connected - bus power
+    /// keeps it running - so over a USB connection this command has no visible effect. Since the same
+    /// connection is what carries the command, there is no way to confirm it either.
+    /// </remarks>
     public async Task PowerOffAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => _connection.Send("POWEROFF"), cancellationToken);
 
     /// <summary>Powers the device on (firmware 5.71+). The device does not acknowledge this command.</summary>
+    /// <remarks>
+    /// Largely moot over USB: plugging the cable in already powers the device on, so by the time a connection
+    /// exists to send this over, the device is on.
+    /// </remarks>
     public async Task PowerOnAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => _connection.Send("POWERON"), cancellationToken);
 
@@ -234,6 +243,122 @@ public sealed class Gmc320sClient : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Locates the log's write pointer by binary search instead of the forward scan
+    /// <see cref="FindHistoryEndAsync"/> does, costing roughly log2(<paramref name="maxAddress"/> /
+    /// <paramref name="probeSize"/>) reads rather than one per chunk of the whole log.
+    /// </summary>
+    /// <remarks>
+    /// This relies on the log being written sequentially with erased flash after it, so that "is this region
+    /// erased?" is monotonic in the address. Two consequences worth knowing:
+    /// <list type="bullet">
+    /// <item>Where <see cref="FindHistoryEndAsync"/> reports the <em>first</em> erased run it meets (useful
+    /// when you want the earliest boundary), this reports the <em>last</em> written byte - which is what you
+    /// want for reading recent data.</item>
+    /// <item>If the log has ever wrapped, the invariant fails and bisection would mislead. The final
+    /// <paramref name="probeSize"/> bytes are checked first, and <see langword="null"/> is returned without
+    /// bisecting if they are not erased - so a full or wrapped buffer yields no answer rather than a
+    /// confidently wrong one. See PROTOCOL-NOTES.md; wrap behavior is still untested.</item>
+    /// </list>
+    /// </remarks>
+    /// <param name="maxAddress">Upper bound of the search, exclusive. Defaults to 0x100000 (1MB), the commonly cited - but unverified - GMC-320 flash size.</param>
+    /// <param name="probeSize">Bytes read per probe, and the number of consecutive 0xFF bytes required to call a region erased. Larger is more resistant to a genuine run of 255-valued readings being mistaken for erased flash.</param>
+    /// <param name="cancellationToken"></param>
+    /// <returns>The first erased address after the newest entry, or <see langword="null"/> if the tail of the searched range is not erased.</returns>
+    public async Task<int?> FindHistoryEndFastAsync(
+        int maxAddress = 0x100000, int probeSize = 256, CancellationToken cancellationToken = default)
+    {
+        if (maxAddress is <= 0 or > 0x1000000) throw new ArgumentOutOfRangeException(nameof(maxAddress), "Must be 1-0x1000000.");
+        if (probeSize is < 1 or > 2048) throw new ArgumentOutOfRangeException(nameof(probeSize), "Probe size must be 1-2048 (two probes must fit in one 4096-byte read).");
+
+        var tailProbe = Math.Min(probeSize, maxAddress);
+        if (!IsErased(await GetHistoryAsync(maxAddress - tailProbe, tailProbe, cancellationToken))) return null;
+
+        // Invariant: everything at or below lo is treated as written, hi is known erased.
+        var lo = 0;
+        var hi = maxAddress - tailProbe;
+        while (hi - lo > probeSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var mid = lo + (hi - lo) / 2;
+            var probe = await GetHistoryAsync(mid, Math.Min(probeSize, maxAddress - mid), cancellationToken);
+            if (IsErased(probe)) hi = mid; else lo = mid;
+        }
+
+        // The boundary lies within [lo, hi + probeSize); read that span and take the last written byte.
+        var spanLength = Math.Min(hi + probeSize - lo, maxAddress - lo);
+        var span = await GetHistoryAsync(lo, spanLength, cancellationToken);
+        for (var i = span.Length - 1; i >= 0; i--)
+            if (span[i] != 0xFF) return lo + i + 1;
+
+        return lo;
+    }
+
+    private static bool IsErased(byte[] chunk) => chunk.All(b => b == 0xFF);
+
+    /// <summary>
+    /// Reads the most recent <paramref name="readingCount"/> readings without paging through the whole log:
+    /// it locates the write pointer by binary search, then reads backward from it and resynchronizes on a
+    /// <c>55 AA</c> anchor.
+    /// </summary>
+    /// <remarks>
+    /// The number of readings between anchors is deliberately not assumed: a device restart writes an extra
+    /// anchor and an interrupted session ends a batch early (both seen on real hardware), so the bytes needed
+    /// for a given number of readings cannot be computed up front. The window is grown backward until enough
+    /// readings are found, the start of flash is reached, or <paramref name="maxLookbackBytes"/> is exhausted.
+    /// </remarks>
+    /// <param name="readingCount">How many of the newest readings to return.</param>
+    /// <param name="historyEnd">A known write pointer, to skip re-probing for it. Omit to locate it via <see cref="FindHistoryEndFastAsync"/>.</param>
+    /// <param name="maxAddress">Passed through to <see cref="FindHistoryEndFastAsync"/> when <paramref name="historyEnd"/> is omitted.</param>
+    /// <param name="maxLookbackBytes">Safety cap on how far back to read before giving up and returning what was found.</param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="InvalidOperationException">The write pointer could not be located - see <see cref="FindHistoryEndFastAsync"/>.</exception>
+    public async Task<GmcRecentHistory> GetRecentHistoryAsync(
+        int readingCount, int? historyEnd = null, int maxAddress = 0x100000, int maxLookbackBytes = 65536,
+        CancellationToken cancellationToken = default)
+    {
+        if (readingCount <= 0) throw new ArgumentOutOfRangeException(nameof(readingCount), "Must be positive.");
+        if (maxLookbackBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxLookbackBytes), "Must be positive.");
+
+        var end = historyEnd ?? await FindHistoryEndFastAsync(maxAddress, cancellationToken: cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Could not locate the end of the history log: the tail of the searched range is not erased flash, " +
+                "so the log may be full or may have wrapped. Pass a larger maxAddress, or a known historyEnd.");
+
+        const int maxChunk = 4096;
+        var collected = Array.Empty<byte>();
+        var windowStart = end;
+        var entries = (IReadOnlyList<GmcHistoryEntry>)Array.Empty<GmcHistoryEntry>();
+
+        while (windowStart > 0 && end - windowStart < maxLookbackBytes)
+        {
+            var chunk = Math.Min(maxChunk, windowStart);
+            windowStart -= chunk;
+            collected = [.. await GetHistoryAsync(windowStart, chunk, cancellationToken), .. collected];
+
+            // Address 0 is a known entry boundary; anywhere else the window may start mid-entry.
+            entries = windowStart == 0
+                ? GmcHistoryParser.Parse(collected).Entries
+                : GmcHistoryParser.ParseResynced(collected).Entries;
+
+            if (entries.Count(e => e is GmcHistoryReading) >= readingCount) break;
+        }
+
+        return new GmcRecentHistory(TrimToLastReadings(entries, readingCount), windowStart, end);
+    }
+
+    private static IReadOnlyList<GmcHistoryEntry> TrimToLastReadings(IReadOnlyList<GmcHistoryEntry> entries, int readingCount)
+    {
+        var seen = 0;
+        for (var i = entries.Count - 1; i >= 0; i--)
+        {
+            if (entries[i] is GmcHistoryReading && ++seen == readingCount)
+                return entries.Skip(i).ToList();
+        }
+
+        return entries;
     }
 
     public async Task<GmcReading> ReadAsync(CancellationToken cancellationToken = default)

@@ -24,3 +24,19 @@ public sealed record GmcHistoryMarker(byte MarkerType) : GmcHistoryEntry;
 
 /// <summary>Result of parsing a history byte buffer: whatever was confidently decoded, plus everything after the point parsing had to stop.</summary>
 public sealed record GmcHistoryParseResult(IReadOnlyList<GmcHistoryEntry> Entries, byte[] UnparsedRemainder);
+
+/// <summary>
+/// Result of parsing a window read from an arbitrary flash address. <paramref name="AnchorOffset"/> is the
+/// offset within the window where the first recognizable <c>55 AA</c> anchor was found and parsing began, or
+/// -1 if none was found (in which case <paramref name="Entries"/> is empty).
+/// </summary>
+public sealed record GmcHistoryResyncResult(IReadOnlyList<GmcHistoryEntry> Entries, int AnchorOffset, byte[] UnparsedRemainder);
+
+/// <summary>
+/// The tail of the history log. <paramref name="Entries"/> ends at the newest entry written, and any
+/// timestamps/markers the device wrote within that span are included alongside the readings.
+/// </summary>
+/// <param name="Entries">Chronological entries, ending at the most recent one.</param>
+/// <param name="WindowStartAddress">Flash address the containing window was read from - pass a lower end address to page further back.</param>
+/// <param name="HistoryEndAddress">The log's write pointer: the first erased-flash address after the newest entry.</param>
+public sealed record GmcRecentHistory(IReadOnlyList<GmcHistoryEntry> Entries, int WindowStartAddress, int HistoryEndAddress);

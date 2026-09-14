@@ -6,7 +6,37 @@ internal class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        var exitCode = await RunAsync(args);
+        Pause();
+        return exitCode;
+    }
+
+    /// <summary>Keeps the window open when the app is launched from a debugger or by double-clicking the exe.</summary>
+    private static void Pause()
+    {
+        // Redirected input means there's no interactive console to wait on (a pipe, CI, or a test harness),
+        // and ReadKey would throw rather than block.
+        if (System.Console.IsInputRedirected) return;
+
+        System.Console.WriteLine();
+        System.Console.Write("Press any key to exit...");
+        try
+        {
+            System.Console.ReadKey(intercept: true);
+        }
+        catch (InvalidOperationException)
+        {
+            // No console attached at all - nothing to pause for.
+        }
+
+        System.Console.WriteLine();
+    }
+
+    private static async Task<int> RunAsync(string[] args)
+    {
         int? keyToPress = null;
+        var recentCount = 100;
+        var fullScan = false;
         var positional = new List<string>();
         for (var i = 0; i < args.Length; i++)
         {
@@ -20,6 +50,20 @@ internal class Program
 
                 keyToPress = key;
                 i++;
+            }
+            else if (args[i] == "--recent")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out recentCount) || recentCount <= 0)
+                {
+                    System.Console.Error.WriteLine("Error: --recent requires a positive number of readings.");
+                    return 4;
+                }
+
+                i++;
+            }
+            else if (args[i] == "--full-scan")
+            {
+                fullScan = true;
             }
             else
             {
@@ -80,34 +124,37 @@ internal class Program
 
                 const int historyLength = 4096; // max chunk GetHistoryAsync/SPIR supports per call
                 var history = await gmc.GetHistoryAsync(0, historyLength, cts.Token);
-                var historyEnd = await gmc.FindHistoryEndAsync(cancellationToken: cts.Token);
 
                 const int hexPreviewBytes = 64;
                 var hexPreview = Convert.ToHexString(history, 0, Math.Min(hexPreviewBytes, history.Length));
-                System.Console.WriteLine($"History[0..{historyLength}): {hexPreview}{(history.Length > hexPreviewBytes ? "..." : "")}  (log end: {(historyEnd is int e ? $"0x{e:X6} / {e}" : "not found")})");
-                System.Console.WriteLine(historyEnd is int usedBytes
-                    ? $"Estimated readings available: ~{usedBytes} (best guess, assuming ~1 byte/reading; actual count is somewhat lower due to periodic timestamp/marker overhead)"
-                    : "Estimated readings available: unknown (no erased-flash boundary found within the scanned range)");
+                System.Console.WriteLine($"History[0..{historyLength}): {hexPreview}{(history.Length > hexPreviewBytes ? "..." : "")}");
 
-                const int printedReadingsCap = 256;
-                var firstChunk = GmcHistoryParser.Parse(history);
-                var index = 0;
-                foreach (var entry in firstChunk.Entries)
+                // Bisect to the write pointer rather than walking the log: ~13 reads instead of one per chunk.
+                var historyEnd = await gmc.FindHistoryEndFastAsync(cancellationToken: cts.Token);
+                System.Console.WriteLine(historyEnd is int end
+                    ? $"Log write pointer: 0x{end:X6} / {end} (~{end} readings, assuming ~1 byte each minus timestamp/marker overhead)"
+                    : "Log write pointer: not found - the tail of the scanned range isn't erased, so the log may be full or wrapped.");
+
+                if (historyEnd is int writePointer)
                 {
-                    if (index < printedReadingsCap) System.Console.WriteLine($"  [{index,4}] {entry}");
-                    index++;
+                    var recent = await gmc.GetRecentHistoryAsync(recentCount, writePointer, cancellationToken: cts.Token);
+                    System.Console.WriteLine($"Most recent {recentCount} readings (window from 0x{recent.WindowStartAddress:X6}):");
+
+                    var position = 0;
+                    foreach (var entry in recent.Entries)
+                        System.Console.WriteLine($"  [{position++,4}] {entry}");
                 }
 
-                // Keep walking the rest of the log in further 4096-byte chunks up to the probed end, printing
-                // only timestamps (not every reading) - the running index keeps showing where each one landed.
-                // A marker can straddle a chunk boundary, so unparsed trailing bytes from one chunk are
-                // prepended to the next before parsing again, rather than guessed at or dropped.
-                if (historyEnd is int scanEnd && scanEnd > historyLength)
+                // The forward walk costs one read per 4096 bytes of log, so it's opt-in; it's the way to see
+                // every timestamp across the whole history rather than just the tail. A marker can straddle a
+                // chunk boundary, so unparsed trailing bytes carry over into the next chunk.
+                if (fullScan && historyEnd is int scanEnd)
                 {
-                    System.Console.WriteLine($"Scanning the rest of the log (0x{historyLength:X6}..0x{scanEnd:X6}) for more timestamps...");
+                    System.Console.WriteLine($"Scanning the whole log (0x000000..0x{scanEnd:X6}) for timestamps...");
 
-                    var remainder = firstChunk.UnparsedRemainder;
-                    var address = historyLength;
+                    var remainder = Array.Empty<byte>();
+                    var address = 0;
+                    var index = 0;
                     while (address < scanEnd)
                     {
                         var length = Math.Min(historyLength, scanEnd - address);
@@ -117,7 +164,7 @@ internal class Program
                         var parsed = GmcHistoryParser.Parse(combined);
                         foreach (var entry in parsed.Entries)
                         {
-                            if (entry is GmcHistoryTimestamp) System.Console.WriteLine($"  [{index,4}] {entry}");
+                            if (entry is GmcHistoryTimestamp) System.Console.WriteLine($"  [{index,6}] {entry}");
                             index++;
                         }
 
@@ -125,11 +172,7 @@ internal class Program
                         address += length;
                     }
 
-                    System.Console.WriteLine("Done scanning.");
-                }
-                else if (historyEnd is null)
-                {
-                    System.Console.WriteLine("Skipping full-log timestamp scan: no erased-flash boundary was found, so the log's true extent is unknown.");
+                    System.Console.WriteLine($"Done scanning: {index} entries.");
                 }
 
                 if (keyToPress.HasValue)
