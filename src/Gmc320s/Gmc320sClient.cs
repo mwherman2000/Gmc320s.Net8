@@ -166,9 +166,14 @@ public sealed class Gmc320sClient : IDisposable
     }
 
     /// <remarks>
-    /// Despite the command name, the values behave like an accelerometer rather than a rate gyroscope: on a
-    /// device lying flat, Z sits near -16384 while X and Y stay near zero, which reads as -1g on Z (gravity)
-    /// at a scale of roughly 16384 counts per g. That is why Z looks like a suspiciously round constant.
+    /// Despite the command name these are accelerometer readings, not rotation rates: the values are the
+    /// static gravity vector, so a stationary device reads 1 g total rather than zero.
+    /// <para>
+    /// Scale is <b>16384 counts per g</b>. The underlying sensor is 12-bit left-shifted into a 16-bit field -
+    /// every value is a multiple of 16 - so there are 4096 effective steps over a ±2 g range. Lying flat, Z
+    /// reads about -16384 (-1 g) while X and Y sit within a few hundred counts of zero, which is a tilt of
+    /// roughly a degree. Divide by 16384.0 to get g. See PROTOCOL-NOTES.md for the measurements.
+    /// </para>
     /// </remarks>
     public async Task<GmcGyro> GetGyroAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>

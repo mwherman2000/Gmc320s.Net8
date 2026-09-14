@@ -140,7 +140,10 @@ internal class Program
                 System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (runs ~5-6 °C above ambient; self-heating)");
 
                 var gyro = await gmc.GetGyroAsync(cts.Token);
-                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}  (accelerometer; Z ~ -16384 is 1g of gravity)");
+                System.Console.WriteLine(
+                    $"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}  =  " +
+                    $"X={gyro.X / 16384.0:F3}g Y={gyro.Y / 16384.0:F3}g Z={gyro.Z / 16384.0:F3}g (calculated)  " +
+                    $"[accelerometer, not a rate gyro: 16384 counts per g, so a stationary device reads 1g total]");
 
                 // Converted using the calibration points the device itself stores, not a hardcoded
                 // sensitivity - so it still refuses rather than guessing if that table is unreadable.
