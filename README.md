@@ -84,6 +84,9 @@ dotnet run --project .\src\Gmc320s.Console
 
 # Or specify a port explicitly
 dotnet run --project .\src\Gmc320s.Console -- COM5
+
+# Also simulate pressing a physical button (0-3) before starting the live CPS stream
+dotnet run --project .\src\Gmc320s.Console -- COM5 --key 0
 ```
 
 ## NuGet packaging

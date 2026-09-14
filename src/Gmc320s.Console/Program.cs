@@ -6,7 +6,28 @@ internal class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        var port = args.Length > 0 ? args[0] : null;
+        int? keyToPress = null;
+        var positional = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--key")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out var key) || key is < 0 or > 3)
+                {
+                    System.Console.Error.WriteLine("Error: --key requires a button number (0-3).");
+                    return 4;
+                }
+
+                keyToPress = key;
+                i++;
+            }
+            else
+            {
+                positional.Add(args[i]);
+            }
+        }
+
+        var port = positional.Count > 0 ? positional[0] : null;
 
         using var cts = new CancellationTokenSource();
         System.Console.CancelKeyPress += (_, e) =>
@@ -52,10 +73,34 @@ internal class Program
                 System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
                 System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C");
                 System.Console.WriteLine($"Device time: {await gmc.GetDateTimeAsync(cts.Token):yyyy-MM-dd HH:mm:ss}");
+                System.Console.WriteLine($"Serial: {await gmc.GetSerialNumberAsync(cts.Token)}");
+
+                var config = await gmc.GetConfigAsync(cts.Token);
+                System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
+
+                var history = await gmc.GetHistoryAsync(0, 16, cts.Token);
+                System.Console.WriteLine($"History[0..16): {Convert.ToHexString(history)}");
+
+                if (keyToPress.HasValue)
+                {
+                    await gmc.PressKeyAsync(keyToPress.Value, cts.Token);
+                    System.Console.WriteLine($"Pressed key {keyToPress.Value}.");
+                }
+
                 System.Console.WriteLine("Live CPS (Ctrl+C to stop):");
 
+                // CPM is the trailing 60-second sum of CPS - the device itself computes it the same way.
+                // A separate GETCPM query can't be interleaved here: ReadCpsAsync holds the client's gate for
+                // its whole duration, and sending another command while the heartbeat stream is active would
+                // also risk corrupting the byte framing.
+                var window = new Queue<int>();
                 await foreach (var cps in gmc.ReadCpsAsync(null, cts.Token))
-                    System.Console.WriteLine($"{DateTimeOffset.Now:HH:mm:ss}  {cps,6} CPS");
+                {
+                    window.Enqueue(cps);
+                    if (window.Count > 60) window.Dequeue();
+
+                    System.Console.WriteLine($"{DateTimeOffset.Now:HH:mm:ss}  {cps,6} CPS  {window.Sum(),6} CPM");
+                }
             }
 
             System.Console.WriteLine("Stopped.");
