@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageId>Gmc320s.Net</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Michael Herman</Authors>
+    <Description>.NET 8 library for GQ Electronics GMC-320S using the RFC1201 serial protocol.</Description>
+    <PackageTags>GMC-320S;GQ;Geiger;Geiger-Muller;radiation;RFC1201;serial</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+</Project>
