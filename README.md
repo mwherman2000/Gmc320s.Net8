@@ -223,6 +223,11 @@ dotnet run --project .\src\Gmc320s.Console -- COM5 --key 0
 # Show more of the newest readings (default 100) - reads only the tail of the log
 dotnet run --project .\src\Gmc320s.Console -- COM5 --recent 300
 
+# Loop the orientation sensor, printing raw counts, g per axis and vector magnitude.
+# Defaults to 25 samples; |g| should read 1.000 on a still device, so it doubles as a
+# quick calibration check. Pass 0 to suppress the table.
+dotnet run --project .\src\Gmc320s.Console -- COM5 --orientation 50
+
 # Additionally walk the entire log and print every timestamp (one read per 4096 bytes, so slow)
 dotnet run --project .\src\Gmc320s.Console -- COM5 --full-scan
 ```

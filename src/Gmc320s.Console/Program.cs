@@ -36,6 +36,7 @@ internal class Program
     {
         int? keyToPress = null;
         var recentCount = 100;
+        var orientationSamples = 25;
         var fullScan = false;
         var rawCommands = new List<(string Command, int Length)>();
         var positional = new List<string>();
@@ -57,6 +58,17 @@ internal class Program
                 if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out recentCount) || recentCount <= 0)
                 {
                     System.Console.Error.WriteLine("Error: --recent requires a positive number of readings.");
+                    return 4;
+                }
+
+                i++;
+            }
+            else if (args[i] == "--orientation")
+            {
+                // Defaults to 25; 0 suppresses the sample table, leaving just the single reading above it.
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out orientationSamples) || orientationSamples < 0)
+                {
+                    System.Console.Error.WriteLine("Error: --orientation requires a sample count of 0 or more.");
                     return 4;
                 }
 
@@ -144,6 +156,22 @@ internal class Program
                     $"Orientation: X={orientation.X} Y={orientation.Y} Z={orientation.Z}  =  " +
                     $"X={orientation.X / 16384.0:F3}g Y={orientation.Y / 16384.0:F3}g Z={orientation.Z / 16384.0:F3}g (calculated)  " +
                     $"[GETGYRO is really an accelerometer: 16384 counts per g, so a stationary device reads 1g total]");
+
+                if (orientationSamples > 0)
+                {
+                    System.Console.WriteLine();
+                    System.Console.WriteLine($"--- Orientation, {orientationSamples} samples ---   g and |g| are (calculated); a still device should read |g| = 1.000");
+                    System.Console.WriteLine("   #        X       Y       Z         Xg       Yg       Zg      |g|");
+
+                    for (var sample = 1; sample <= orientationSamples; sample++)
+                    {
+                        var o = await gmc.GetOrientationAsync(cts.Token);
+                        double xg = o.X / 16384.0, yg = o.Y / 16384.0, zg = o.Z / 16384.0;
+
+                        System.Console.WriteLine(
+                            $"  {sample,2}   {o.X,6}  {o.Y,6}  {o.Z,6}   {xg,8:F4} {yg,8:F4} {zg,8:F4} {Math.Sqrt(xg * xg + yg * yg + zg * zg),8:F4}");
+                    }
+                }
 
                 // Converted using the calibration points the device itself stores, not a hardcoded
                 // sensitivity - so it still refuses rather than guessing if that table is unreadable.
