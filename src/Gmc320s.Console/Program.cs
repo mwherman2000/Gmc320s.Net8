@@ -89,8 +89,48 @@ internal class Program
                     ? $"Estimated readings available: ~{usedBytes} (best guess, assuming ~1 byte/reading; actual count is somewhat lower due to periodic timestamp/marker overhead)"
                     : "Estimated readings available: unknown (no erased-flash boundary found within the scanned range)");
 
-                foreach (var entry in GmcHistoryParser.Parse(history).Entries.Take(100))
-                    System.Console.WriteLine($"  {entry}");
+                const int printedReadingsCap = 256;
+                var firstChunk = GmcHistoryParser.Parse(history);
+                var index = 0;
+                foreach (var entry in firstChunk.Entries)
+                {
+                    if (index < printedReadingsCap) System.Console.WriteLine($"  [{index,4}] {entry}");
+                    index++;
+                }
+
+                // Keep walking the rest of the log in further 4096-byte chunks up to the probed end, printing
+                // only timestamps (not every reading) - the running index keeps showing where each one landed.
+                // A marker can straddle a chunk boundary, so unparsed trailing bytes from one chunk are
+                // prepended to the next before parsing again, rather than guessed at or dropped.
+                if (historyEnd is int scanEnd && scanEnd > historyLength)
+                {
+                    System.Console.WriteLine($"Scanning the rest of the log (0x{historyLength:X6}..0x{scanEnd:X6}) for more timestamps...");
+
+                    var remainder = firstChunk.UnparsedRemainder;
+                    var address = historyLength;
+                    while (address < scanEnd)
+                    {
+                        var length = Math.Min(historyLength, scanEnd - address);
+                        var chunkBytes = await gmc.GetHistoryAsync(address, length, cts.Token);
+                        byte[] combined = [.. remainder, .. chunkBytes];
+
+                        var parsed = GmcHistoryParser.Parse(combined);
+                        foreach (var entry in parsed.Entries)
+                        {
+                            if (entry is GmcHistoryTimestamp) System.Console.WriteLine($"  [{index,4}] {entry}");
+                            index++;
+                        }
+
+                        remainder = parsed.UnparsedRemainder;
+                        address += length;
+                    }
+
+                    System.Console.WriteLine("Done scanning.");
+                }
+                else if (historyEnd is null)
+                {
+                    System.Console.WriteLine("Skipping full-log timestamp scan: no erased-flash boundary was found, so the log's true extent is unknown.");
+                }
 
                 if (keyToPress.HasValue)
                 {

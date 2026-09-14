@@ -8,8 +8,13 @@ public sealed record GmcConfig(IReadOnlyDictionary<string, object?> Values, byte
 /// <summary>A decoded entry from a <c>SPIR</c> history read. See <see cref="GmcHistoryParser"/>.</summary>
 public abstract record GmcHistoryEntry;
 
-/// <summary>A plain one-byte CPM sample.</summary>
-public sealed record GmcHistoryReading(byte Cpm) : GmcHistoryEntry;
+/// <summary>
+/// A plain one-byte log sample. Named <c>Count</c> rather than <c>Cpm</c>: real-hardware observation shows
+/// these recur about once per second between periodic timestamp anchors (see <see cref="GmcHistoryTimestamp"/>
+/// and PROTOCOL-NOTES.md), which is far more consistent with a per-second CPS value than a per-minute CPM
+/// value - but that's an inference from timing, not a documented fact.
+/// </summary>
+public sealed record GmcHistoryReading(byte Count) : GmcHistoryEntry;
 
 /// <summary>A <c>55 AA 00</c> marker followed by a YY/MM/DD/HH/MM/SS timestamp.</summary>
 public sealed record GmcHistoryTimestamp(DateTime Timestamp) : GmcHistoryEntry;

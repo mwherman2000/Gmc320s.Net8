@@ -20,7 +20,7 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
 - `KEY0`-`KEY3` simulated button presses
-- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`), plus a heuristic probe for where logged data ends and erased flash begins (`FindHistoryEndAsync`)
+- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`), a heuristic probe for where logged data ends and erased flash begins (`FindHistoryEndAsync`), and a best-effort decoder for the observed timestamp/marker/reading log format (`GmcHistoryParser`)
 - RFC1201 heartbeat (`HEARTBEAT1` / `HEARTBEAT0`)
 - Continuous CPS stream
 - Raw command access (`SendRawAsync`)
@@ -85,6 +85,18 @@ Console.WriteLine(end is int e ? $"Logged data ends around 0x{e:X6}." : "No eras
 
 This is a heuristic, not a protocol-documented answer: it reads flash forward in chunks looking for the first long run of `0xFF` bytes (erased flash), since GQ has never published where the real log data ends. See [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) for the caveats.
 
+### Decoding the history log
+
+```csharp
+var history = await gmc.GetHistoryAsync(0, 4096);
+var result = GmcHistoryParser.Parse(history);
+
+foreach (var entry in result.Entries)
+    Console.WriteLine(entry);
+```
+
+`GmcHistoryParser` decodes the `55 AA`-prefixed timestamp/marker scheme observed on real hardware into `GmcHistoryTimestamp`, `GmcHistoryMarker`, and `GmcHistoryReading` entries, and deliberately stops at any unrecognized marker type rather than guess a payload length - the rest of the buffer comes back as `result.UnparsedRemainder` for you to fetch more of and re-parse (prepending the remainder to the next chunk, since a marker can straddle a 4096-byte chunk boundary).
+
 **Real hardware example.** Against an actual GMC-320S, `FindHistoryEndAsync()` returned `0x01A3B7` (107447) quickly — nowhere near the full 1MB scan bound — and the first 16 bytes read from address 0 were:
 
 ```
@@ -98,7 +110,9 @@ No `0xFF` appears at all; instead there's a repeating `55 AA` prefix, which read
 └─ sync ┘  └── payload ───┘  └sync┘└┘   └─ sync ┘
 ```
 
-`55 AA 00` followed by `1A 07 15 0C 27 23` decodes suspiciously well as a timestamp entry using the same YY/MM/DD/HH/MM/SS layout as `GETDATETIME`/`SETDATETIME`: `26 07 21 12 39 35` → 2026-07-21 12:39:35. `55 AA 01` then appears to carry no payload before the next marker starts. This is one observed sample, not a verified spec — nothing in the library decodes history entries based on it yet.
+`55 AA 00` followed by `1A 07 15 0C 27 23` decodes suspiciously well as a timestamp entry using the same YY/MM/DD/HH/MM/SS layout as `GETDATETIME`/`SETDATETIME`: `26 07 21 12 39 35` → 2026-07-21 12:39:35. `55 AA 01` then appears to carry no payload before the next marker starts. `GmcHistoryParser` decodes exactly this (see below); it stops rather than guess at any other marker type.
+
+**A second finding, from scanning much further into the same device's log:** a `55 AA 00` timestamp+marker pair recurs every **exactly 182 entries** — repeated ~379 times across roughly 69,000 entries — with consecutive timestamps consistently **179 seconds apart** (occasional 178/180s jitter from whole-second RTC rounding). 182 entries = timestamp + marker + 180 plain readings, and 180 readings in ~179 seconds is ~1 reading/second. That's why `GmcHistoryReading`'s field is named `Count`, not `Cpm`: a true 60-second rolling CPM wouldn't fluctuate the way these per-entry values do, but the magnitude and volatility line up with the live `HEARTBEAT1` CPS stream from the same device. Treat this as a strong inference from timing, not a documented fact — see [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md).
 
 ## Console test
 
@@ -120,3 +134,7 @@ dotnet pack .\src\Gmc320s\Gmc320s.csproj -c Release
 ```
 
 This produces `Gmc320s.Net.0.1.0.nupkg`.
+
+## License
+
+MIT - see [LICENSE](LICENSE).

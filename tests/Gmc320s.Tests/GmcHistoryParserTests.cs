@@ -32,7 +32,7 @@ public class GmcHistoryParserTests
 
         Assert.Equal(3, result.Entries.Count);
         Assert.All(result.Entries, e => Assert.IsType<GmcHistoryReading>(e));
-        Assert.Equal(new byte[] { 1, 2, 3 }, result.Entries.Cast<GmcHistoryReading>().Select(r => r.Cpm));
+        Assert.Equal(new byte[] { 1, 2, 3 }, result.Entries.Cast<GmcHistoryReading>().Select(r => r.Count));
         Assert.Empty(result.UnparsedRemainder);
     }
 
