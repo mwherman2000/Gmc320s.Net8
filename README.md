@@ -1,4 +1,4 @@
-# Gmc320s.Net — .NET 8 GMC-320S library
+# Gmc320s.Net — .NET 8 GQ GMC-320S library
 
 A small .NET 8 library for communicating with the GQ Electronics GMC-320S over its USB serial interface using the GQ RFC1201 command protocol.
 
