@@ -27,6 +27,14 @@ internal sealed class FakeSerialPort : ISerialPort
     public int FailMatchingWritesBeforeReply { get; set; }
 
     /// <summary>
+    /// After this many matching writes, switch from <see cref="ReplyPayload"/> to
+    /// <see cref="NextReplyPayload"/> - for modelling a device that answers badly once and then correctly.
+    /// </summary>
+    public int? SwitchToPayloadAfterMatchingWrites { get; set; }
+
+    public byte[]? NextReplyPayload { get; set; }
+
+    /// <summary>
     /// When set, simulates a real flash chip for SPIR reads: decodes the address/length out of each written
     /// SPIR frame and replies with the corresponding slice, padded with 0xFF (erased flash) past the image's
     /// end. Independent of <see cref="ReplyTriggerPrefix"/>, so it doesn't affect other commands.
@@ -72,8 +80,13 @@ internal sealed class FakeSerialPort : ISerialPort
         if (!Encoding.ASCII.GetString(frame).StartsWith(ReplyTriggerPrefix, StringComparison.Ordinal)) return;
 
         _matchingWriteCount++;
-        if (_matchingWriteCount > FailMatchingWritesBeforeReply)
-            foreach (var b in ReplyPayload) _incoming.Enqueue(b);
+        if (_matchingWriteCount <= FailMatchingWritesBeforeReply) return;
+
+        var payload = SwitchToPayloadAfterMatchingWrites is int after && _matchingWriteCount > after && NextReplyPayload is not null
+            ? NextReplyPayload
+            : ReplyPayload;
+
+        foreach (var b in payload) _incoming.Enqueue(b);
     }
 
     public int Read(byte[] buffer, int offset, int count)

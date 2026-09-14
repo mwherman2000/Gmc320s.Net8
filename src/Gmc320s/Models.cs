@@ -3,7 +3,16 @@ namespace Gmc320s;
 public sealed record GmcReading(DateTimeOffset Timestamp, int CountsPerMinute, double? MicroSievertsPerHour = null);
 public sealed record GmcDeviceInfo(string? Version, string? SerialNumber);
 public sealed record GmcGyro(short X, short Y, short Z);
-public sealed record GmcConfig(IReadOnlyDictionary<string, object?> Values, byte[] Raw);
+/// <summary>One CPM-to-µSv/h calibration point read out of the device configuration.</summary>
+public sealed record GmcCalibrationPoint(int Cpm, double MicroSievertsPerHour);
+
+/// <param name="Values">Named leading configuration bytes, exposed raw. See <see cref="GmcConfigParser"/>.</param>
+/// <param name="Calibration">CPM-to-µSv/h calibration points, empty if the table could not be read.</param>
+/// <param name="Raw">The full 256-byte configuration blob.</param>
+public sealed record GmcConfig(
+    IReadOnlyDictionary<string, object?> Values,
+    IReadOnlyList<GmcCalibrationPoint> Calibration,
+    byte[] Raw);
 
 /// <summary>A decoded entry from a <c>SPIR</c> history read. See <see cref="GmcHistoryParser"/>.</summary>
 public abstract record GmcHistoryEntry;

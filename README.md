@@ -30,7 +30,8 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETTEMP` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETDATETIME` / `SETDATETIME`
 - `GETGYRO` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
-- `GETCFG` configuration readout, with the well-documented leading bytes parsed into `GmcConfig.Values` (raw 256-byte blob still available via `GmcConfig.Raw`)
+- `GETCFG` configuration readout, with the leading bytes parsed into `GmcConfig.Values` and the hardware-verified calibration table into `GmcConfig.Calibration` (raw 256-byte blob still available via `GmcConfig.Raw`)
+- CPM-to-µSv/h conversion from the device's own stored calibration (`GetMicroSievertsPerHourAsync`, `GmcCalibration`)
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
 - `KEY0`-`KEY3` simulated button presses
@@ -40,9 +41,27 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - Raw command access (`SendRawAsync`)
 - Async-friendly .NET 8 API with cancellation support throughout
 
-## Intentionally not guessed
+## µSv/h conversion
 
-µSv/h conversion is **not** silently implemented. The PyGMC project notes that GQ does not provide an official stable source for the device configuration/cpm-to-µSv/h formula and that firmware changes can affect configuration bytes. A verified calibration implementation can be added once the exact GMC-320S firmware/configuration is captured.
+Originally left unimplemented on purpose, because GQ publishes no stable source for the CPM-to-µSv/h formula and a hardcoded sensitivity would have been a guess. It is now implemented from the device's **own** stored calibration, captured out of `GETCFG` on real hardware:
+
+| Offset | Field | Encoding | Value read |
+|---|---|---|---|
+| 8-9 | CPM point 1 | `uint16` big-endian | 1538 |
+| 10-13 | µSv/h point 1 | `float` **little**-endian | 10.0 |
+| 14-19 | CPM/µSv/h point 2 | as above | 15380 / 100.0 |
+| 20-25 | CPM/µSv/h point 3 | as above | 30760 / 200.0 |
+
+Note the mixed endianness within one table — that really is how the device stores it; big-endian floats decode to denormal garbage (~1e-41). All three points agree on **153.8 CPM per µSv/h**, i.e. 0.0065 µSv/h per CPM, the documented figure for this tube.
+
+```csharp
+var usv = await gmc.GetMicroSievertsPerHourAsync();          // reads GETCFG each call
+
+var config = await gmc.GetConfigAsync();                     // or convert many values offline
+var many = cpmValues.Select(c => GmcCalibration.ToMicroSievertsPerHour(c, config.Calibration));
+```
+
+`GmcCalibration` interpolates piecewise between the stored points, treats (0 CPM, 0 µSv/h) as an implicit origin so low counts can't yield a negative dose rate, and extrapolates along the final segment above the top point. If the table is unreadable it still throws `NotSupportedException` rather than inventing a number.
 
 ## Not yet implemented
 
@@ -61,7 +80,8 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 <GETGYRO>>  ->  0010 0030 C090 AA  X=16, Y=48, Z=-16240, 0xAA terminator
 ```
 
-- **85.0 °C means "sensor not ready", not 85 degrees.** That's the classic power-on-reset default of common digital temperature sensors, returned when read before a conversion completes. Expect it right after a reset or power cycle; it settles to real values within a minute or two.
+- **Consecutive reads are stable, but one reply pattern is bogus.** Twenty back-to-back reads returned byte-identical values, so no general double-read is warranted. However an impossible "negative zero" (`00 00 01 AA` — sign flag set over zero magnitude) turns up about once in thirty reads; `GetTemperatureCelsiusAsync` rejects exactly that and re-reads. A value that disagrees with one taken moments earlier is thermal lag, not staleness, and re-reading won't fix it. The recurring 85.0 °C may be another not-ready value, but it hasn't been captured raw and 85.0 is representable, so it is deliberately not filtered.
+- **Readings run ~5-6 °C above room temperature.** That's self-heating inside a USB-powered enclosure, not a decode error. The encoding is plain binary and was verified as such: hand-warming produced `19 08` → `19 09` → `1A 00` (25.8 → 25.9 → 26.0 °C), and the nibble `A` in `0x1A` rules out the BCD reading that a naive ambient comparison would otherwise suggest.
 - **`GETGYRO` is an accelerometer, not a rate gyroscope.** Lying flat, Z reads about -16384 with X and Y near zero — that's -1g on Z at roughly 16384 counts per g. The oddly round Z value is gravity, not garbage.
 
 ## Known limitation: sharing a connection across clients

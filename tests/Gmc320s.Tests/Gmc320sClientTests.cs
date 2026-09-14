@@ -40,6 +40,53 @@ public class Gmc320sClientTests
     }
 
     [Fact]
+    public async Task GetTemperatureCelsiusAsync_DecodesAPositiveReading()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { 0x1B, 0x06, 0x00, 0xAA } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        Assert.Equal(27.6, await client.GetTemperatureCelsiusAsync(), 3);
+    }
+
+    [Fact]
+    public async Task GetTemperatureCelsiusAsync_DecodesANegativeReading()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { 0x05, 0x04, 0x01, 0xAA } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        Assert.Equal(-5.4, await client.GetTemperatureCelsiusAsync(), 3);
+    }
+
+    [Fact]
+    public async Task GetTemperatureCelsiusAsync_RejectsTheNegativeZeroNotReadyReplyAndReReads()
+    {
+        // "-0.0 C" - sign flag set over a zero magnitude - is never a real reading. Seen about once in
+        // thirty reads on real hardware, with the following read correct.
+        var port = new FakeSerialPort
+        {
+            ReplyTriggerPrefix = "<GETTEMP",
+            ReplyPayload = new byte[] { 0x00, 0x00, 0x01, 0xAA },
+            SwitchToPayloadAfterMatchingWrites = 1,
+            NextReplyPayload = new byte[] { 0x16, 0x00, 0x00, 0xAA }
+        };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        Assert.Equal(22.0, await client.GetTemperatureCelsiusAsync(), 3);
+        Assert.Equal(2, port.WrittenFrames.Count(f => f.Length > 2 && f[1] == 'G' && f[2] == 'E'));
+    }
+
+    [Fact]
+    public async Task GetTemperatureCelsiusAsync_DoesNotReReadAValidReading()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { 0x1B, 0x06, 0x00, 0xAA } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        await client.GetTemperatureCelsiusAsync();
+
+        Assert.Single(port.WrittenFrames, f => f.Length > 2 && f[1] == 'G' && f[2] == 'E');
+    }
+
+    [Fact]
     public async Task GetHistoryAsync_EncodesAddressAndLengthMinusOne()
     {
         const int length = 10;

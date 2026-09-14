@@ -89,18 +89,28 @@ public sealed class Gmc320sClient : IDisposable
         => await ExecuteAsync(() => _connection.Command("GETVOLT", 1)[0] / 10.0, cancellationToken);
 
     /// <remarks>
-    /// A reading of exactly 85.0 °C is almost certainly not real: 85 °C is the classic power-on-reset default
-    /// of common digital temperature sensors, returned when the sensor is read before it has completed a
-    /// conversion. It shows up on this device shortly after a reset or power cycle and gives way to plausible
-    /// values once it has settled, so treat 85.0 as "not ready yet" rather than as a measurement.
+    /// Two things to know about this reading, both established against real hardware (see PROTOCOL-NOTES.md):
+    /// <list type="bullet">
+    /// <item>Values run roughly 5-6 °C above room temperature. That is self-heating inside a USB-powered
+    /// enclosure, not a decoding error - the encoding is plain binary and was verified as such.</item>
+    /// <item>The sensor occasionally answers with an impossible "negative zero" (sign flag set, zero
+    /// magnitude), seen roughly once in thirty reads. That single reply is rejected and re-read here.
+    /// Otherwise consecutive reads are byte-identical, so no general double-read is needed; a value that
+    /// disagrees with a moments-earlier one reflects genuine thermal lag, which re-reading cannot fix.</item>
+    /// </list>
     /// </remarks>
     public async Task<double> GetTemperatureCelsiusAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {
             var b = _connection.Command("GETTEMP", 4);
+            if (IsNotReady(b)) b = _connection.Command("GETTEMP", 4);
+
             var sign = b[2] == 0 ? 1 : -1;
             return sign * (b[0] + b[1] / 10.0);
         }, cancellationToken);
+
+    /// <summary>Detects the device's "-0.0 °C" not-ready reply: the sign flag set over a zero magnitude, which is never a real reading.</summary>
+    private static bool IsNotReady(byte[] reply) => reply[0] == 0 && reply[1] == 0 && reply[2] != 0;
 
     public async Task<DateTime> GetDateTimeAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
@@ -372,10 +382,20 @@ public sealed class Gmc320sClient : IDisposable
         return entries;
     }
 
+    /// <summary>Reads the current CPM, converted to µSv/h where the device's calibration allows it.</summary>
+    /// <remarks>
+    /// Costs two round trips (<c>GETCPM</c> then <c>GETCFG</c>). <see cref="GmcReading.MicroSievertsPerHour"/>
+    /// is left <see langword="null"/> rather than throwing when the device holds no usable calibration.
+    /// </remarks>
     public async Task<GmcReading> ReadAsync(CancellationToken cancellationToken = default)
     {
         var cpm = await GetCpmAsync(cancellationToken);
-        return new GmcReading(DateTimeOffset.UtcNow, cpm);
+        var config = await GetConfigAsync(cancellationToken);
+
+        return new GmcReading(
+            DateTimeOffset.UtcNow,
+            cpm,
+            GmcCalibration.TryToMicroSievertsPerHour(cpm, config.Calibration, out var microSieverts) ? microSieverts : null);
     }
 
     /// <summary>Enables the device heartbeat and yields one CPS value approximately each second.</summary>
@@ -409,13 +429,21 @@ public sealed class Gmc320sClient : IDisposable
         }
     }
 
-    /// <summary>Converts CPM to µSv/h using three calibration points from the device configuration.</summary>
-    /// <remarks>This is best-effort because the device firmware/configuration format is not officially stable.</remarks>
+    /// <summary>Converts CPM to µSv/h using the calibration points stored in the device's own configuration.</summary>
+    /// <param name="cpm">The CPM value to convert. Omit to read the current CPM from the device first.</param>
+    /// <param name="cancellationToken"></param>
+    /// <remarks>
+    /// This reads <c>GETCFG</c> on every call. To convert many values, read the configuration once and call
+    /// <see cref="GmcCalibration.ToMicroSievertsPerHour"/> directly with <see cref="GmcConfig.Calibration"/>.
+    /// The conversion uses the device's stored points rather than a hardcoded sensitivity, so it follows
+    /// whatever calibration the unit actually holds.
+    /// </remarks>
+    /// <exception cref="NotSupportedException">The device configuration holds no usable calibration points.</exception>
     public async Task<double> GetMicroSievertsPerHourAsync(int? cpm = null, CancellationToken cancellationToken = default)
     {
-        // The GMC configuration calibration bytes are firmware-sensitive. This method is deliberately not
-        // implemented as a hidden formula; callers should supply their calibration model once verified.
-        throw new NotSupportedException("µSv/h conversion is firmware/configuration dependent. Use CPM directly or supply a verified calibration model.");
+        var countsPerMinute = cpm ?? await GetCpmAsync(cancellationToken);
+        var config = await GetConfigAsync(cancellationToken);
+        return GmcCalibration.ToMicroSievertsPerHour(countsPerMinute, config.Calibration);
     }
 
     /// <summary>Reads and parses the device's 256-byte configuration blob. See <see cref="GmcConfigParser"/> for what's decoded.</summary>

@@ -137,21 +137,20 @@ internal class Program
                 System.Console.WriteLine($"CPM: {await gmc.GetCpmAsync(cts.Token)}");
                 System.Console.WriteLine($"Reading: {await gmc.ReadAsync(cts.Token)}");
                 System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
-                System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (unreliable on the GMC-320S - see README)");
+                System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (runs ~5-6 °C above ambient; self-heating)");
 
                 var gyro = await gmc.GetGyroAsync(cts.Token);
-                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}  (unreliable on the GMC-320S - see README)");
+                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}  (accelerometer; Z ~ -16384 is 1g of gravity)");
 
-                // Deliberately not implemented: the CPM-to-uSv/h calibration is firmware-dependent and GQ
-                // publishes no stable source for it, so the library refuses to guess rather than return a
-                // plausible-looking wrong number. Shown here because that decision is part of the demo.
+                // Converted using the calibration points the device itself stores, not a hardcoded
+                // sensitivity - so it still refuses rather than guessing if that table is unreadable.
                 try
                 {
-                    System.Console.WriteLine($"uSv/h: {await gmc.GetMicroSievertsPerHourAsync(cancellationToken: cts.Token):F3}");
+                    System.Console.WriteLine($"uSv/h: {await gmc.GetMicroSievertsPerHourAsync(cancellationToken: cts.Token):F4}");
                 }
                 catch (NotSupportedException ex)
                 {
-                    System.Console.WriteLine($"uSv/h: not supported - {ex.Message}");
+                    System.Console.WriteLine($"uSv/h: not available - {ex.Message}");
                 }
 
                 System.Console.WriteLine();
@@ -161,6 +160,9 @@ internal class Program
                 var config = await gmc.GetConfigAsync(cts.Token);
                 System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
                 System.Console.WriteLine($"Config raw: {config.Raw.Length} bytes, first 32: {Convert.ToHexString(config.Raw, 0, Math.Min(32, config.Raw.Length))}");
+                System.Console.WriteLine(config.Calibration.Count > 0
+                    ? $"Calibration: {string.Join(", ", config.Calibration.Select(p => $"{p.Cpm} CPM = {p.MicroSievertsPerHour:G} uSv/h ({p.Cpm / p.MicroSievertsPerHour:F1} CPM per uSv/h)"))}"
+                    : "Calibration: no usable points found in the configuration.");
 
                 foreach (var (rawCommand, rawLength) in rawCommands)
                 {
