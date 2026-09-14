@@ -133,9 +133,9 @@ internal class Program
                 System.Console.WriteLine($"DeviceInfo: {await gmc.GetDeviceInfoAsync(cts.Token)}");
 
                 System.Console.WriteLine();
-                System.Console.WriteLine("--- Measurements ---");
+                System.Console.WriteLine("--- Measurements ---   values marked (calculated) are derived by this library, not reported by the device");
                 System.Console.WriteLine($"CPM: {await gmc.GetCpmAsync(cts.Token)}");
-                System.Console.WriteLine($"Reading: {await gmc.ReadAsync(cts.Token)}");
+                System.Console.WriteLine($"Reading: {await gmc.ReadAsync(cts.Token)}  (MicroSievertsPerHour is calculated)");
                 System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
                 System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (runs ~5-6 °C above ambient; self-heating)");
 
@@ -146,7 +146,7 @@ internal class Program
                 // sensitivity - so it still refuses rather than guessing if that table is unreadable.
                 try
                 {
-                    System.Console.WriteLine($"uSv/h: {await gmc.GetMicroSievertsPerHourAsync(cancellationToken: cts.Token):F4}");
+                    System.Console.WriteLine($"uSv/h: {await gmc.GetMicroSievertsPerHourAsync(cancellationToken: cts.Token):F4}  (calculated from CPM and the device's stored calibration)");
                 }
                 catch (NotSupportedException ex)
                 {
@@ -161,7 +161,8 @@ internal class Program
                 System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
                 System.Console.WriteLine($"Config raw: {config.Raw.Length} bytes, first 32: {Convert.ToHexString(config.Raw, 0, Math.Min(32, config.Raw.Length))}");
                 System.Console.WriteLine(config.Calibration.Count > 0
-                    ? $"Calibration: {string.Join(", ", config.Calibration.Select(p => $"{p.Cpm} CPM = {p.MicroSievertsPerHour:G} uSv/h ({p.Cpm / p.MicroSievertsPerHour:F1} CPM per uSv/h)"))}"
+                    ? $"Calibration: {string.Join(", ", config.Calibration.Select(p => $"{p.Cpm} CPM = {p.MicroSievertsPerHour:G} uSv/h"))}"
+                      + $"  [ratios: {string.Join(", ", config.Calibration.Select(p => $"{p.Cpm / p.MicroSievertsPerHour:F1}"))} CPM per uSv/h (calculated)]"
                     : "Calibration: no usable points found in the configuration.");
 
                 foreach (var (rawCommand, rawLength) in rawCommands)
@@ -183,8 +184,10 @@ internal class Program
                 // Bisect to the write pointer rather than walking the log: ~13 reads instead of one per chunk.
                 var historyEnd = await gmc.FindHistoryEndFastAsync(cancellationToken: cts.Token);
                 System.Console.WriteLine(historyEnd is int end
-                    ? $"Log write pointer: 0x{end:X6} / {end} (~{end} readings, assuming ~1 byte each minus timestamp/marker overhead)"
+                    ? $"Log write pointer: 0x{end:X6} / {end}  (calculated - probed by bisection; the protocol never reports it)"
                     : "Log write pointer: not found - the tail of the scanned range isn't erased, so the log may be full or wrapped.");
+                if (historyEnd is int usedBytes)
+                    System.Console.WriteLine($"Readings stored: ~{usedBytes}  (calculated - assumes ~1 byte each, so it overcounts by the timestamp/marker overhead)");
 
                 if (historyEnd is int writePointer)
                 {
@@ -244,19 +247,21 @@ internal class Program
                     System.Console.WriteLine($"Pressed key {keyToPress.Value}.");
                 }
 
-                System.Console.WriteLine("Live CPS (Ctrl+C to stop):");
+                System.Console.WriteLine();
+                System.Console.WriteLine("--- Live CPS (Ctrl+C to stop) ---");
+                System.Console.WriteLine("time         CPS     CPM (calculated)");
 
-                // CPM is the trailing 60-second sum of CPS - the device itself computes it the same way.
-                // A separate GETCPM query can't be interleaved here: ReadCpsAsync holds the client's gate for
-                // its whole duration, and sending another command while the heartbeat stream is active would
-                // also risk corrupting the byte framing.
+                // CPM here is a trailing 60-second sum of CPS computed on this side, NOT the device's own
+                // GETCPM: ReadCpsAsync holds the client's gate for its whole duration, so a GETCPM query
+                // can't be interleaved, and issuing one mid-heartbeat would risk corrupting the framing.
+                // It also reads low for the first minute, until the window fills.
                 var window = new Queue<int>();
                 await foreach (var cps in gmc.ReadCpsAsync(null, cts.Token))
                 {
                     window.Enqueue(cps);
                     if (window.Count > 60) window.Dequeue();
 
-                    System.Console.WriteLine($"{DateTimeOffset.Now:HH:mm:ss}  {cps,6} CPS  {window.Sum(),6} CPM");
+                    System.Console.WriteLine($"{DateTimeOffset.Now:HH:mm:ss}  {cps,6}  {window.Sum(),6}{(window.Count < 60 ? "  (window filling)" : "")}");
                 }
             }
 
