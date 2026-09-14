@@ -27,9 +27,9 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETVER`
 - `GETCPM`
 - `GETVOLT`
-- `GETTEMP` (but see [Unreliable on this model](#unreliable-on-this-model-gettemp-and-getgyro))
+- `GETTEMP` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETDATETIME` / `SETDATETIME`
-- `GETGYRO` (but see [Unreliable on this model](#unreliable-on-this-model-gettemp-and-getgyro))
+- `GETGYRO` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETCFG` configuration readout, with the well-documented leading bytes parsed into `GmcConfig.Values` (raw 256-byte blob still available via `GmcConfig.Raw`)
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
@@ -52,11 +52,17 @@ Configuration-editing commands: `ECFG`/`WCFG`/`CFGUPDATE` (writing individual co
 
 `Gmc320sConnection` retries a command up to 3 times (with a short delay and input-buffer flush between attempts) if a read times out, to smooth over occasional non-responses from the device. A persistent failure (device off, wrong port, cable unplugged) still surfaces as a `TimeoutException` after all attempts are exhausted. The live CPS heartbeat stream (`ReadCpsAsync`) gets the same per-frame retry treatment. See [BACKLOG.md](BACKLOG.md) for making the attempt count/delay configurable.
 
-## Unreliable on this model: `GETTEMP` and `GETGYRO`
+## Reading `GETTEMP` and `GETGYRO`
 
-Both commands exist in RFC1201 and this library implements them, but on a real GMC-320S (firmware `GMC-320SRe 1.1`) neither returns believable data. Temperature read 85.0 °C on most attempts — note 85 is `0x55` — against a single plausible-looking 22.7 °C, and gyro values cluster on suspiciously round numbers (`Z = 0xC000`, X/Y always small multiples of 16).
+Both work on the GMC-320S, but their decoded values are easy to misread — this repo briefly documented them as broken before the raw bytes proved otherwise:
 
-Temperature and gyroscope hardware appear to be GMC-320+ / 500-series features, so the likeliest explanation is that this model answers both commands with undefined data and the one believable temperature was the coincidence. Treat both as unreliable here until someone dumps the raw reply bytes across several reads (via `SendRawAsync`) and establishes whether they're constant junk or genuinely varying.
+```
+<GETTEMP>>  ->  16 00 00 AA        22, 0 tenths, positive sign, 0xAA terminator  = 22.0 °C
+<GETGYRO>>  ->  0010 0030 C090 AA  X=16, Y=48, Z=-16240, 0xAA terminator
+```
+
+- **85.0 °C means "sensor not ready", not 85 degrees.** That's the classic power-on-reset default of common digital temperature sensors, returned when read before a conversion completes. Expect it right after a reset or power cycle; it settles to real values within a minute or two.
+- **`GETGYRO` is an accelerometer, not a rate gyroscope.** Lying flat, Z reads about -16384 with X and Y near zero — that's -1g on Z at roughly 16384 counts per g. The oddly round Z value is gravity, not garbage.
 
 ## Known limitation: sharing a connection across clients
 

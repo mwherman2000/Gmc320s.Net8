@@ -37,6 +37,7 @@ internal class Program
         int? keyToPress = null;
         var recentCount = 100;
         var fullScan = false;
+        var rawCommands = new List<(string Command, int Length)>();
         var positional = new List<string>();
         for (var i = 0; i < args.Length; i++)
         {
@@ -59,6 +60,19 @@ internal class Program
                     return 4;
                 }
 
+                i++;
+            }
+            else if (args[i] == "--raw")
+            {
+                // <COMMAND>:<expected reply bytes>, e.g. --raw GETTEMP:4 - repeatable.
+                var spec = i + 1 < args.Length ? args[i + 1].Split(':') : [];
+                if (spec.Length != 2 || string.IsNullOrWhiteSpace(spec[0]) || !int.TryParse(spec[1], out var rawLength) || rawLength is <= 0 or > 4096)
+                {
+                    System.Console.Error.WriteLine("Error: --raw requires COMMAND:BYTES, e.g. --raw GETTEMP:4 (BYTES is 1-4096).");
+                    return 4;
+                }
+
+                rawCommands.Add((spec[0], rawLength));
                 i++;
             }
             else if (args[i] == "--full-scan")
@@ -112,18 +126,50 @@ internal class Program
 
             using (gmc)
             {
+                System.Console.WriteLine();
+                System.Console.WriteLine("--- Identity ---");
                 System.Console.WriteLine($"Version: {version}");
-                System.Console.WriteLine($"CPM: {await gmc.GetCpmAsync(cts.Token)}");
-                System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
-                System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C");
-                System.Console.WriteLine($"Device time: {await gmc.GetDateTimeAsync(cts.Token):yyyy-MM-dd HH:mm:ss}");
                 System.Console.WriteLine($"Serial: {await gmc.GetSerialNumberAsync(cts.Token)}");
+                System.Console.WriteLine($"DeviceInfo: {await gmc.GetDeviceInfoAsync(cts.Token)}");
+
+                System.Console.WriteLine();
+                System.Console.WriteLine("--- Measurements ---");
+                System.Console.WriteLine($"CPM: {await gmc.GetCpmAsync(cts.Token)}");
+                System.Console.WriteLine($"Reading: {await gmc.ReadAsync(cts.Token)}");
+                System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
+                System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (unreliable on the GMC-320S - see README)");
 
                 var gyro = await gmc.GetGyroAsync(cts.Token);
-                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}");
+                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}  (unreliable on the GMC-320S - see README)");
+
+                // Deliberately not implemented: the CPM-to-uSv/h calibration is firmware-dependent and GQ
+                // publishes no stable source for it, so the library refuses to guess rather than return a
+                // plausible-looking wrong number. Shown here because that decision is part of the demo.
+                try
+                {
+                    System.Console.WriteLine($"uSv/h: {await gmc.GetMicroSievertsPerHourAsync(cancellationToken: cts.Token):F3}");
+                }
+                catch (NotSupportedException ex)
+                {
+                    System.Console.WriteLine($"uSv/h: not supported - {ex.Message}");
+                }
+
+                System.Console.WriteLine();
+                System.Console.WriteLine("--- Clock and configuration ---");
+                System.Console.WriteLine($"Device time: {await gmc.GetDateTimeAsync(cts.Token):yyyy-MM-dd HH:mm:ss}");
 
                 var config = await gmc.GetConfigAsync(cts.Token);
                 System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
+                System.Console.WriteLine($"Config raw: {config.Raw.Length} bytes, first 32: {Convert.ToHexString(config.Raw, 0, Math.Min(32, config.Raw.Length))}");
+
+                foreach (var (rawCommand, rawLength) in rawCommands)
+                {
+                    var reply = await gmc.SendRawAsync(rawCommand, rawLength, cts.Token);
+                    System.Console.WriteLine($"Raw <{rawCommand}>> -> {Convert.ToHexString(reply)}");
+                }
+
+                System.Console.WriteLine();
+                System.Console.WriteLine("--- History ---");
 
                 const int historyLength = 4096; // max chunk GetHistoryAsync/SPIR supports per call
                 var history = await gmc.GetHistoryAsync(0, historyLength, cts.Token);
@@ -141,11 +187,23 @@ internal class Program
                 if (historyEnd is int writePointer)
                 {
                     var recent = await gmc.GetRecentHistoryAsync(recentCount, writePointer, cancellationToken: cts.Token);
-                    System.Console.WriteLine($"Most recent {recentCount} readings (window from 0x{recent.WindowStartAddress:X6}):");
+                    System.Console.WriteLine($"Most recent {recentCount} readings (window from 0x{recent.WindowStartAddress:X6}, {recent.Entries.Count} entries incl. anchors):");
 
                     var position = 0;
                     foreach (var entry in recent.Entries)
                         System.Console.WriteLine($"  [{position++,4}] {entry}");
+                }
+
+                // The linear scan reads one chunk per 4096 bytes of log, so it's opt-in alongside the full
+                // walk. It reports the FIRST erased run it meets, where the bisecting probe above reports the
+                // LAST written byte - they agree on a simple log and can differ if the log contains an
+                // interior run of 0xFF, which is exactly why both exist.
+                if (fullScan)
+                {
+                    var linearEnd = await gmc.FindHistoryEndAsync(cancellationToken: cts.Token);
+                    System.Console.WriteLine(linearEnd is int first
+                        ? $"Linear scan boundary: 0x{first:X6} / {first}{(linearEnd == historyEnd ? " (agrees with the bisecting probe)" : " (DIFFERS from the bisecting probe - interior erased run?)")}"
+                        : "Linear scan boundary: not found.");
                 }
 
                 // The forward walk costs one read per 4096 bytes of log, so it's opt-in; it's the way to see

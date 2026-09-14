@@ -89,9 +89,10 @@ public sealed class Gmc320sClient : IDisposable
         => await ExecuteAsync(() => _connection.Command("GETVOLT", 1)[0] / 10.0, cancellationToken);
 
     /// <remarks>
-    /// Unreliable on the GMC-320S: repeated reads on firmware <c>GMC-320SRe 1.1</c> mostly returned 85.0 °C
-    /// (85 = <c>0x55</c>) rather than anything plausible. Temperature hardware appears to be a GMC-320+ /
-    /// 500-series feature, so this model likely answers the command with undefined data. See PROTOCOL-NOTES.md.
+    /// A reading of exactly 85.0 °C is almost certainly not real: 85 °C is the classic power-on-reset default
+    /// of common digital temperature sensors, returned when the sensor is read before it has completed a
+    /// conversion. It shows up on this device shortly after a reset or power cycle and gives way to plausible
+    /// values once it has settled, so treat 85.0 as "not ready yet" rather than as a measurement.
     /// </remarks>
     public async Task<double> GetTemperatureCelsiusAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
@@ -128,9 +129,9 @@ public sealed class Gmc320sClient : IDisposable
     }
 
     /// <remarks>
-    /// Unreliable on the GMC-320S: values on firmware <c>GMC-320SRe 1.1</c> cluster on suspiciously round
-    /// numbers (<c>Z = 0xC000</c>, X/Y always small multiples of 16), suggesting no gyroscope hardware and an
-    /// undefined reply. Gyro appears to be a GMC-320+ / 500-series feature. See PROTOCOL-NOTES.md.
+    /// Despite the command name, the values behave like an accelerometer rather than a rate gyroscope: on a
+    /// device lying flat, Z sits near -16384 while X and Y stay near zero, which reads as -1g on Z (gravity)
+    /// at a scale of roughly 16384 counts per g. That is why Z looks like a suspiciously round constant.
     /// </remarks>
     public async Task<GmcGyro> GetGyroAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
