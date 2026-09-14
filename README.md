@@ -100,6 +100,17 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 
   For coarse "which way is up" the shared scale is fine. For anything quantitative, apply per-axis gain and offset — and let the device sit still first, since readings taken while it's being handled drifted by as much as the effect being measured.
 
+  **Checking a reading is usable.** `GmcOrientation` exposes `XG`/`YG`/`ZG`, `Magnitude`, and `IsStable`. Magnitude must be 1 g on a motionless device at any orientation, so departures measure motion — below 1 g it is accelerating downward (0 g is free fall), above 1 g it is being accelerated or arrested.
+
+  `IsStable` is **necessary but not sufficient**, and the failure rate is not small. A moving device sweeps *through* 1 g twice per oscillation, so samples caught at those crossings look perfectly still. In a 100-sample capture of the device being shaken hard enough to saturate the sensor, **10 samples passed `IsStable`** — a one-in-ten chance that a single poll reads violent motion as a valid orientation.
+
+  Use `GetStableOrientationAsync` when it matters. It waits for several consecutive samples to agree in *direction* as well as magnitude, throws `TimeoutException` if the device never settles, and returns their average, which also cancels the ~1% per-sample noise:
+
+  ```csharp
+  var settled = await gmc.GetStableOrientationAsync();   // 4 agreeing samples by default
+  Console.WriteLine($"{settled.XG:F3}, {settled.YG:F3}, {settled.ZG:F3} g");
+  ```
+
 ## Known limitation: sharing a connection across clients
 
 `Gmc320sClient` has a public constructor that takes a `Gmc320sConnection` directly, so nothing stops you from wrapping two separate `Gmc320sClient` instances around the *same* connection. Each client has its own independent serialization gate, so the "only one operation in flight" guarantee only holds *within* a single client - it is not enforced across multiple clients sharing one connection. Only `Gmc320sConnection`'s lower-level lock (which serializes raw byte writes/reads) prevents corrupted frames in that scenario; requests from the two clients can still interleave at a higher level. Stick to one `Gmc320sClient` per `Gmc320sConnection`.
@@ -223,9 +234,10 @@ dotnet run --project .\src\Gmc320s.Console -- COM5 --key 0
 # Show more of the newest readings (default 100) - reads only the tail of the log
 dotnet run --project .\src\Gmc320s.Console -- COM5 --recent 300
 
-# Loop the orientation sensor, printing raw counts, g per axis and vector magnitude.
-# Defaults to 25 samples; |g| should read 1.000 on a still device, so it doubles as a
-# quick calibration check. Pass 0 to suppress the table.
+# Loop the orientation sensor, printing raw counts, g per axis, vector magnitude and a
+# still/FALLING/ACCEL state per sample, then a settled average. Defaults to 100 samples;
+# |g| should read 1.000 on a still device, so it doubles as a calibration check.
+# Pass 0 to suppress the table.
 dotnet run --project .\src\Gmc320s.Console -- COM5 --orientation 50
 
 # Additionally walk the entire log and print every timestamp (one read per 4096 bytes, so slow)

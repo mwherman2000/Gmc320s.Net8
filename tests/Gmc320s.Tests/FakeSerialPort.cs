@@ -35,6 +35,14 @@ internal sealed class FakeSerialPort : ISerialPort
     public byte[]? NextReplyPayload { get; set; }
 
     /// <summary>
+    /// Successive replies for successive matching writes - for modelling a device whose answer changes every
+    /// time, such as an accelerometer being read while the device moves and then settles. Takes precedence
+    /// over <see cref="ReplyPayload"/>. The sequence cycles, so a device that never settles keeps on not
+    /// settling rather than quietly going constant once the list runs out.
+    /// </summary>
+    public Queue<byte[]>? ReplySequence { get; set; }
+
+    /// <summary>
     /// When set, simulates a real flash chip for SPIR reads: decodes the address/length out of each written
     /// SPIR frame and replies with the corresponding slice, padded with 0xFF (erased flash) past the image's
     /// end. Independent of <see cref="ReplyTriggerPrefix"/>, so it doesn't affect other commands.
@@ -76,15 +84,24 @@ internal sealed class FakeSerialPort : ISerialPort
             return;
         }
 
-        if (ReplyTriggerPrefix is null || ReplyPayload is null) return;
+        if (ReplyTriggerPrefix is null || (ReplyPayload is null && ReplySequence is not { Count: > 0 })) return;
         if (!Encoding.ASCII.GetString(frame).StartsWith(ReplyTriggerPrefix, StringComparison.Ordinal)) return;
 
         _matchingWriteCount++;
         if (_matchingWriteCount <= FailMatchingWritesBeforeReply) return;
 
-        var payload = SwitchToPayloadAfterMatchingWrites is int after && _matchingWriteCount > after && NextReplyPayload is not null
-            ? NextReplyPayload
-            : ReplyPayload;
+        byte[] payload;
+        if (ReplySequence is { Count: > 0 })
+        {
+            payload = ReplySequence.Dequeue();
+            ReplySequence.Enqueue(payload);
+        }
+        else
+        {
+            payload = SwitchToPayloadAfterMatchingWrites is int after && _matchingWriteCount > after && NextReplyPayload is not null
+                ? NextReplyPayload
+                : ReplyPayload!;
+        }
 
         foreach (var b in payload) _incoming.Enqueue(b);
     }

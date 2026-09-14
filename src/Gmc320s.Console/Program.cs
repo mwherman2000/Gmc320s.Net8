@@ -36,7 +36,7 @@ internal class Program
     {
         int? keyToPress = null;
         var recentCount = 100;
-        var orientationSamples = 25;
+        var orientationSamples = 100;
         var fullScan = false;
         var rawCommands = new List<(string Command, int Length)>();
         var positional = new List<string>();
@@ -65,7 +65,7 @@ internal class Program
             }
             else if (args[i] == "--orientation")
             {
-                // Defaults to 25; 0 suppresses the sample table, leaving just the single reading above it.
+                // Defaults to 100; 0 suppresses the sample table, leaving just the single reading above it.
                 if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out orientationSamples) || orientationSamples < 0)
                 {
                     System.Console.Error.WriteLine("Error: --orientation requires a sample count of 0 or more.");
@@ -154,22 +154,47 @@ internal class Program
                 var orientation = await gmc.GetOrientationAsync(cts.Token);
                 System.Console.WriteLine(
                     $"Orientation: X={orientation.X} Y={orientation.Y} Z={orientation.Z}  =  " +
-                    $"X={orientation.X / 16384.0:F3}g Y={orientation.Y / 16384.0:F3}g Z={orientation.Z / 16384.0:F3}g (calculated)  " +
-                    $"[GETGYRO is really an accelerometer: 16384 counts per g, so a stationary device reads 1g total]");
+                    $"X={orientation.XG:F3}g Y={orientation.YG:F3}g Z={orientation.ZG:F3}g, |g|={orientation.Magnitude:F3} (calculated)  " +
+                    $"[{(orientation.IsStable ? "still - axes are a valid orientation" : "MOVING - axes are motion, not orientation")}]");
 
                 if (orientationSamples > 0)
                 {
                     System.Console.WriteLine();
-                    System.Console.WriteLine($"--- Orientation, {orientationSamples} samples ---   g and |g| are (calculated); a still device should read |g| = 1.000");
-                    System.Console.WriteLine("   #        X       Y       Z         Xg       Yg       Zg      |g|");
+                    System.Console.WriteLine($"--- Orientation, {orientationSamples} samples ---   g and |g| are (calculated); a still device reads |g| = 1.000 whatever its orientation");
+                    System.Console.WriteLine("   #        X       Y       Z         Xg       Yg       Zg      |g|  state");
 
+                    var samples = new List<GmcOrientation>(orientationSamples);
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
                     for (var sample = 1; sample <= orientationSamples; sample++)
                     {
                         var o = await gmc.GetOrientationAsync(cts.Token);
-                        double xg = o.X / 16384.0, yg = o.Y / 16384.0, zg = o.Z / 16384.0;
-
+                        samples.Add(o);
                         System.Console.WriteLine(
-                            $"  {sample,2}   {o.X,6}  {o.Y,6}  {o.Z,6}   {xg,8:F4} {yg,8:F4} {zg,8:F4} {Math.Sqrt(xg * xg + yg * yg + zg * zg),8:F4}");
+                            $"  {sample,2}   {o.X,6}  {o.Y,6}  {o.Z,6}   {o.XG,8:F4} {o.YG,8:F4} {o.ZG,8:F4} {o.Magnitude,8:F4}" +
+                            $"  {(o.IsStable ? "still" : o.Magnitude < 1 ? "FALLING" : "ACCEL")}");
+                    }
+                    clock.Stop();
+
+                    // A run of byte-identical consecutive samples means we are polling faster than the sensor
+                    // refreshes, so the extra reads carry no new information.
+                    var repeats = samples.Zip(samples.Skip(1)).Count(pair => pair.First == pair.Second);
+                    System.Console.WriteLine(
+                        $"  {orientationSamples} samples in {clock.Elapsed.TotalSeconds:F2}s = " +
+                        $"{orientationSamples / clock.Elapsed.TotalSeconds:F1} Hz, {clock.Elapsed.TotalMilliseconds / orientationSamples:F1} ms/read; " +
+                        $"{repeats} identical to previous (calculated)");
+
+                    // A single sample reading ~1 g proves nothing - a moving device crosses 1 g twice per
+                    // oscillation - so this waits for consecutive samples to agree in direction too.
+                    try
+                    {
+                        var settled = await gmc.GetStableOrientationAsync(cancellationToken: cts.Token);
+                        System.Console.WriteLine(
+                            $"  settled: X={settled.X} Y={settled.Y} Z={settled.Z}  =  " +
+                            $"X={settled.XG:F4} Y={settled.YG:F4} Z={settled.ZG:F4}, |g|={settled.Magnitude:F4} (calculated, averaged)");
+                    }
+                    catch (TimeoutException ex)
+                    {
+                        System.Console.WriteLine($"  settled: unavailable - {ex.Message}");
                     }
                 }
 

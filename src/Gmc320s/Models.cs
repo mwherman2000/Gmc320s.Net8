@@ -9,7 +9,55 @@ public sealed record GmcDeviceInfo(string? Version, string? SerialNumber);
 /// divide by 16384.0 for g. The sensor is 12-bit left-shifted into 16 bits, so every value is a multiple of
 /// 16. See <see cref="Gmc320sClient.GetOrientationAsync"/> and PROTOCOL-NOTES.md.
 /// </summary>
-public sealed record GmcOrientation(short X, short Y, short Z);
+public sealed record GmcOrientation(short X, short Y, short Z)
+{
+    /// <summary>Raw counts per g. The sensor is 12-bit left-shifted into 16 bits, so ±2 g spans the full range.</summary>
+    public const double CountsPerG = 16384.0;
+
+    /// <summary>
+    /// Default tolerance for <see cref="IsStable"/>. Deliberately loose: the axes are unevenly trimmed - Y's
+    /// gain is ~4% low - so a genuinely motionless device reads as little as 0.96 g when Y points down.
+    /// Anything tighter would reject real readings depending only on which way up the device happens to be.
+    /// </summary>
+    public const double DefaultStabilityTolerance = 0.10;
+
+    /// <summary>Acceleration along X in g.</summary>
+    public double XG => X / CountsPerG;
+
+    /// <summary>Acceleration along Y in g.</summary>
+    public double YG => Y / CountsPerG;
+
+    /// <summary>Acceleration along Z in g.</summary>
+    public double ZG => Z / CountsPerG;
+
+    /// <summary>
+    /// Length of the acceleration vector in g. A motionless device reads 1.0 whatever its orientation, since
+    /// tilting redistributes gravity between the axes without changing its total. Departures measure motion:
+    /// below 1.0 the device is accelerating downward (0.0 would be free fall), above 1.0 it is being
+    /// accelerated or arrested.
+    /// </summary>
+    public double Magnitude => Math.Sqrt(XG * XG + YG * YG + ZG * ZG);
+
+    /// <summary>
+    /// Whether <see cref="Magnitude"/> is within <see cref="DefaultStabilityTolerance"/> of 1 g. An
+    /// accelerometer cannot distinguish gravity from acceleration, so this is a prerequisite for reading the
+    /// axes as an orientation.
+    /// </summary>
+    /// <remarks>
+    /// <b>Necessary but not sufficient, and the failure rate is not small.</b> A moving device sweeps through
+    /// 1 g magnitude twice per oscillation, so samples taken at those crossings look perfectly still. In a
+    /// 100-sample capture of a device being shaken hard enough to saturate the sensor, <b>10 samples</b>
+    /// satisfied this property. Polling once and trusting the result would therefore have had roughly a one
+    /// in ten chance of reading violent motion as a valid orientation. This property reliably rejects obvious
+    /// motion but cannot confirm stillness on its own; to trust the axes, require several consecutive samples
+    /// to agree in direction as well as magnitude, which is what
+    /// <see cref="Gmc320sClient.GetStableOrientationAsync"/> does.
+    /// </remarks>
+    public bool IsStable => IsStableWithin(DefaultStabilityTolerance);
+
+    /// <summary>As <see cref="IsStable"/>, with a caller-supplied tolerance in g.</summary>
+    public bool IsStableWithin(double toleranceG) => Math.Abs(Magnitude - 1.0) <= toleranceG;
+}
 /// <summary>One CPM-to-µSv/h calibration point read out of the device configuration.</summary>
 public sealed record GmcCalibrationPoint(int Cpm, double MicroSievertsPerHour);
 

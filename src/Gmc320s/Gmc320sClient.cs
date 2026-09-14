@@ -188,6 +188,81 @@ public sealed class Gmc320sClient : IDisposable
             return new GmcOrientation(BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(0, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(2, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(4, 2)));
         }, cancellationToken);
 
+    /// <summary>
+    /// Samples the accelerometer until several consecutive readings agree, and returns their average - a
+    /// reading whose axes can actually be trusted as an orientation.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="GmcOrientation.IsStable"/> on a single sample is necessary but <b>not sufficient</b>. A
+    /// moving device passes through 1 g magnitude twice per oscillation, so an unlucky single sample looks
+    /// perfectly still: during a hand-shake capture, readings of 0.968 g and 1.036 g were taken while the
+    /// device was being violently rotated. Only agreement across consecutive samples - in direction, not just
+    /// magnitude - separates genuinely stationary from momentarily-passing-through.
+    /// <para>
+    /// The returned value is the mean of the qualifying window, which also averages out the ~1% per-sample
+    /// noise. It is therefore not necessarily a multiple of 16, unlike a raw <see cref="GetOrientationAsync"/>
+    /// reading.
+    /// </para>
+    /// </remarks>
+    /// <param name="consecutiveSamples">How many consecutive agreeing samples are required.</param>
+    /// <param name="toleranceG">How far each sample's magnitude may sit from 1 g. Defaults to <see cref="GmcOrientation.DefaultStabilityTolerance"/>, which is loose because the axes are unevenly trimmed.</param>
+    /// <param name="agreementG">How far the samples may spread on any one axis. The default of 0.05 g sits well above the ~0.02 g spread of a motionless device and well below the ~0.16 g swing between consecutive samples of a moving one.</param>
+    /// <param name="maxSamples">Give up after this many reads.</param>
+    /// <param name="cancellationToken"></param>
+    /// <exception cref="TimeoutException">The device did not hold still within <paramref name="maxSamples"/> reads.</exception>
+    public async Task<GmcOrientation> GetStableOrientationAsync(
+        int consecutiveSamples = 4,
+        double toleranceG = GmcOrientation.DefaultStabilityTolerance,
+        double agreementG = 0.05,
+        int maxSamples = 40,
+        CancellationToken cancellationToken = default)
+    {
+        if (consecutiveSamples < 2) throw new ArgumentOutOfRangeException(nameof(consecutiveSamples), "At least two samples are needed to establish agreement.");
+        if (toleranceG <= 0) throw new ArgumentOutOfRangeException(nameof(toleranceG), "Must be positive.");
+        if (agreementG <= 0) throw new ArgumentOutOfRangeException(nameof(agreementG), "Must be positive.");
+        if (maxSamples < consecutiveSamples) throw new ArgumentOutOfRangeException(nameof(maxSamples), "Must allow at least consecutiveSamples reads.");
+
+        var window = new List<GmcOrientation>(consecutiveSamples);
+
+        for (var taken = 0; taken < maxSamples; taken++)
+        {
+            var sample = await GetOrientationAsync(cancellationToken);
+
+            // A sample nowhere near 1 g cannot belong to a stationary run at all, so the run restarts.
+            if (!sample.IsStableWithin(toleranceG))
+            {
+                window.Clear();
+                continue;
+            }
+
+            window.Add(sample);
+            if (window.Count < consecutiveSamples) continue;
+            if (AxesAgree(window, agreementG)) return Average(window);
+
+            window.RemoveAt(0);
+        }
+
+        throw new TimeoutException(
+            $"The device did not hold still: no {consecutiveSamples} consecutive readings agreed within " +
+            $"{agreementG:F3} g per axis across {maxSamples} samples. Let it come to rest, or relax the thresholds.");
+    }
+
+    private static bool AxesAgree(List<GmcOrientation> window, double agreementG) =>
+        Spread(window.Select(o => o.XG)) <= agreementG &&
+        Spread(window.Select(o => o.YG)) <= agreementG &&
+        Spread(window.Select(o => o.ZG)) <= agreementG;
+
+    private static double Spread(IEnumerable<double> values)
+    {
+        var list = values.ToList();
+        return list.Max() - list.Min();
+    }
+
+    private static GmcOrientation Average(List<GmcOrientation> window) => new(
+        (short)Math.Round(window.Average(o => (double)o.X)),
+        (short)Math.Round(window.Average(o => (double)o.Y)),
+        (short)Math.Round(window.Average(o => (double)o.Z)));
+
     public async Task<GmcDeviceInfo> GetDeviceInfoAsync(CancellationToken cancellationToken = default)
     {
         var version = await GetVersionAsync(cancellationToken);
