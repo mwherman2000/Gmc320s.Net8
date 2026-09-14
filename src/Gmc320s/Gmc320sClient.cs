@@ -175,16 +175,17 @@ public sealed class Gmc320sClient : IDisposable
     /// roughly a degree. Divide by 16384.0 to get g. See PROTOCOL-NOTES.md for the measurements.
     /// </para>
     /// <para>
-    /// That scale is only accurate for Z. Measuring the gravity magnitude with each axis vertical in turn
-    /// gave ~1.00 g for Z, 0.983 g for X and 0.959 g for Y, so X reads ~1.7% low and Y ~4.1% low. Fine for
-    /// coarse orientation; calibrate each axis separately for precise tilt work.
+    /// That scale is exact only for Z. A six-position calibration gave gain/offset of 0.995 and +0.011 g for
+    /// X, 0.960 and -0.002 g for Y, and 0.999 and -0.003 g for Z: X's error is almost pure bias, Y's almost
+    /// pure gain. Fine for coarse orientation; apply per-axis gain and offset for quantitative tilt work, and
+    /// let the device settle first - readings taken while it is being handled drift substantially.
     /// </para>
     /// </remarks>
-    public async Task<GmcGyro> GetGyroAsync(CancellationToken cancellationToken = default)
+    public async Task<GmcOrientation> GetOrientationAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {
             var b = _connection.Command("GETGYRO", 7);
-            return new GmcGyro(BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(0, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(2, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(4, 2)));
+            return new GmcOrientation(BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(0, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(2, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(4, 2)));
         }, cancellationToken);
 
     public async Task<GmcDeviceInfo> GetDeviceInfoAsync(CancellationToken cancellationToken = default)

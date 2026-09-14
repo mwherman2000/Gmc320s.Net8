@@ -29,7 +29,7 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETVOLT`
 - `GETTEMP` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETDATETIME` / `SETDATETIME`
-- `GETGYRO` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
+- `GETGYRO`, exposed as `GetOrientationAsync` since it reports an accelerometer rather than a rate gyroscope (see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETCFG` configuration readout, with the leading bytes parsed into `GmcConfig.Values` and the hardware-verified calibration table into `GmcConfig.Calibration` (raw 256-byte blob still available via `GmcConfig.Raw`)
 - CPM-to-µSv/h conversion from the device's own stored calibration (`GetMicroSievertsPerHourAsync`, `GmcCalibration`)
 - `GETSERIAL` device serial number
@@ -82,21 +82,23 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 
 - **Known-bad readings are rejected for you.** The sensor occasionally answers with an impossible "negative zero" (`00 00 01 AA` — sign flag set over zero magnitude, about once in thirty reads) or with 85.0 °C, the classic power-on-reset default of digital temperature sensors. `GetTemperatureCelsiusAsync` re-reads up to three times and throws `InvalidDataException` if every attempt is implausible, so these never reach you as a plausible-looking wrong number. Retrying costs nothing when the reading is genuine, since a good value passes on the first attempt. Otherwise consecutive reads are byte-identical — a value that disagrees with one taken moments earlier is thermal lag, not a bad read, and re-reading won't fix that.
 - **Readings run ~5-6 °C above room temperature.** That's self-heating inside a USB-powered enclosure, not a decode error. The encoding is plain binary and was verified as such: hand-warming produced `19 08` → `19 09` → `1A 00` (25.8 → 25.9 → 26.0 °C), and the nibble `A` in `0x1A` rules out the BCD reading that a naive ambient comparison would otherwise suggest.
-- **`GETGYRO` is an accelerometer, not a rate gyroscope — scale 16384 counts per g.** The values are the static gravity vector, so a stationary device reads 1 g total, not zero. Divide by `16384.0` for g.
+- **`GETGYRO` is an accelerometer, not a rate gyroscope — scale 16384 counts per g.** The values are the static gravity vector, so a stationary device reads 1 g total, not zero. Divide by `16384.0` for g. The API calls this `GetOrientationAsync`/`GmcOrientation`, naming it for what it measures rather than mirroring the misleading command name.
 
   Six stationary samples make the scale exact. Every component is a multiple of 16, so the sensor is **12-bit left-shifted into a 16-bit field** (4096 effective steps over ±2 g) — that's what made the numbers look suspiciously round. After the shift Z lands on −1024 = −2¹⁰, i.e. −1 g. The clincher is the vector magnitude, which came to 0.991-1.020 g across all six: a stationary accelerometer *must* read 1 g since gravity never switches off, while a stationary gyroscope would read zero on every axis.
 
   Lying flat, X and Y within a few hundred counts of zero corresponds to under ~1° of tilt. Standing the device on edge confirmed the scale out-of-sample: Z collapsed to 0.071 g while Y rose to 0.956 g, and the implied lean of **4.4°** matched the ~5° the device was visibly tilted — a correct angle recovered from an orientation the scale factor was never fitted to.
 
-  **Caveat for precise work: 16384 counts per g is only accurate for Z.** Magnitude must be 1.000 g at any orientation, so measuring it with each axis vertical in turn isolates that axis's gain:
+  **Caveat for precise work: 16384 counts per g is accurate only for Z.** A full six-position calibration — each axis pointed up, then down — separates gain from offset, since `k = (r₊ − r₋)/2` and `b = (r₊ + r₋)/2`:
 
-  | Dominant axis | Magnitude | Gain error |
-  |---|---|---|
-  | Z (flat) | 0.991-1.020 g | ~0% (reference) |
-  | X (on edge) | 0.983 g | ~1.7% low |
-  | Y (other edge) | 0.959 g | ~4.1% low |
+  | Axis | +1 g | −1 g | Gain | Offset |
+  |---|---|---|---|---|
+  | X | +1.006 g | −0.983 g | 0.995 | **+0.011 g** |
+  | Y | +0.956 g | −0.959 g | **0.958** | −0.002 g |
+  | Z | +0.996 g | −1.002 g | 0.999 | −0.003 g |
 
-  The part is loosely trimmed overall, with Y clearly the worst — routine for a cheap 12-bit accelerometer. Tilt can't account for it: the X reading was within 0.43° of vertical and still 1.7% low. For coarse "which way is up" the single scale is fine; for precise tilt work, calibrate each axis separately.
+  The two bad axes fail in opposite ways: X's error is almost pure **bias** (its gain is fine), Y's is almost pure **gain** (its bias is negligible), and Z is well trimmed on both counts. One direction per axis can't distinguish the two — measuring only X-down made it look 1.7% low on gain when the gain is actually near perfect.
+
+  For coarse "which way is up" the shared scale is fine. For anything quantitative, apply per-axis gain and offset — and let the device sit still first, since readings taken while it's being handled drifted by as much as the effect being measured.
 
 ## Known limitation: sharing a connection across clients
 

@@ -3,12 +3,13 @@ namespace Gmc320s;
 public sealed record GmcReading(DateTimeOffset Timestamp, int CountsPerMinute, double? MicroSievertsPerHour = null);
 public sealed record GmcDeviceInfo(string? Version, string? SerialNumber);
 /// <summary>
-/// A <c>GETGYRO</c> reading. Despite the command name these are accelerometer axes, not rotation rates, so a
-/// stationary device reports the gravity vector (1 g total) rather than zero. Scale is <b>16384 counts per
-/// g</b>; divide by 16384.0 for g. The sensor is 12-bit left-shifted into 16 bits, so every value is a
-/// multiple of 16. See <see cref="Gmc320sClient.GetGyroAsync"/> and PROTOCOL-NOTES.md.
+/// A <c>GETGYRO</c> reading. Named for what it measures rather than for the command: despite that name these
+/// are accelerometer axes, not rotation rates, so a stationary device reports the gravity vector (1 g total)
+/// rather than zero - which makes it an orientation sensor in practice. Scale is <b>16384 counts per g</b>;
+/// divide by 16384.0 for g. The sensor is 12-bit left-shifted into 16 bits, so every value is a multiple of
+/// 16. See <see cref="Gmc320sClient.GetOrientationAsync"/> and PROTOCOL-NOTES.md.
 /// </summary>
-public sealed record GmcGyro(short X, short Y, short Z);
+public sealed record GmcOrientation(short X, short Y, short Z);
 /// <summary>One CPM-to-µSv/h calibration point read out of the device configuration.</summary>
 public sealed record GmcCalibrationPoint(int Cpm, double MicroSievertsPerHour);
 
