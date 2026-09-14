@@ -1,6 +1,20 @@
 # Gmc320s.Net — .NET 8 GMC-320S library
 
-A small .NET 8 library for communicating with the GQ Electronics GMC-320S over its USB serial interface using the RFC1201 command protocol.
+A small .NET 8 library for communicating with the GQ Electronics GMC-320S over its USB serial interface using the GQ RFC1201 command protocol.
+
+## About RFC1201
+
+RFC1201 is GQ Electronics' own proprietary protocol, first published by them around 2012 (the spec document carries the notice "Copyright (C) GQ Electronics LLC (2012). All Rights Reserved") and revised since. It has nothing to do with the IETF's [RFC 1201](https://datatracker.ietf.org/doc/html/rfc1201) ("Transmitting IP Traffic over ARCNET Networks," 1991) - the number collision is coincidental; GQ's "RFC" is just their own internal document-naming convention, not a standards-track submission.
+
+It's also a single-vendor protocol, not an industry standard: as far as can be determined, every device that speaks RFC1201 (or its siblings, below) is a GQ Electronics product, and every piece of software that speaks it was written specifically to talk to those devices (PyGMC, gq-gmc-control, this library, etc.). No evidence of adoption by another manufacturer or an unrelated device category was found.
+
+GQ uses a small family of these protocols across their own measurement-device lineup:
+
+| Protocol | Devices | Notes |
+|---|---|---|
+| **RFC1201** | GMC-280, GMC-300, GMC-300E, GMC-320, GMC-320+ (this library's target) | `GETCPM` replies with 2 bytes |
+| RFC1801 | GMC-500, GMC-500+, GMC-600, GMC-600+, GMC-800 | Newer/higher-end counters; `GETCPM` replies with 4 bytes, otherwise similar `<COMMAND>>` framing |
+| RFC1701 | EMF-360, EMF-360+, EMF-360v2, EMF-360+v2, EMF-380, EMF-380v2, EMF-390 | A different product category entirely - multi-field EMF/RF/ELF meters, not Geiger counters |
 
 ## Verification status
 
@@ -138,3 +152,5 @@ This produces `Gmc320s.Net.0.1.0.nupkg`.
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+This covers this library's own code only. The RFC1201 protocol it implements is GQ Electronics LLC's own specification (copyright 2012, per the spec document itself; see [About RFC1201](#about-rfc1201)) - this project is an independent client implementation based on their published documentation and real-hardware observation, not a redistribution of GQ's spec or software.
