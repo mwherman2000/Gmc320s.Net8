@@ -15,6 +15,36 @@ Consider:
   GMC device should answer `GETVER` quickly; the long timeout is only needed for
   flaky-but-real connections during normal use).
 
+## Unexplained: reading counts don't reconcile with elapsed time around restarts
+
+A restart experiment (four power cycles at roughly 3, 2 and 1 minute intervals) confirmed
+the qualitative behaviour - see PROTOCOL-NOTES.md - but left a quantitative anomaly.
+
+In steady state the log rate is a clean ~1.006 readings/second: the last undisturbed
+interval before the experiment was 182 entries across 179 seconds. In the restart region
+the counts stop reconciling in *both* directions:
+
+| From | To | Entries | Elapsed | Implied rate |
+|---|---|---|---|---|
+| 13:21:03 | 13:23:01 | 87 | 118s | 0.72/s |
+| 13:24:55 | 13:25:37 | 64 | 42s | **1.48/s** |
+
+The second row is the troubling one: more readings than seconds elapsed, which is
+impossible at one reading per second. So around a restart either the logging rate changes,
+the RTC is briefly wrong (plausible if it re-initialises at boot), or an anchor timestamp
+means something other than "the moment this entry was written".
+
+Two things would settle it, neither expensive:
+- Restart times recorded to the **second**. The times used were rounded to the minute, so
+  correlating specific anchors to specific power events carried up to 60s of slop and could
+  not be used to check the arithmetic independently.
+- A long undisturbed run afterwards, to confirm the ~1/second rate re-establishes itself and
+  that the anomaly is confined to the restart window.
+
+Until this is understood, do not derive a wall-clock time for an individual reading by
+counting entries forward from the nearest preceding anchor. That interpolation is only
+sound where the rate is known to hold, which is exactly what this anomaly puts in doubt.
+
 ## Decode the rest of the GETCFG configuration blob
 
 Of the 256 bytes, only offsets 0-5 (named, but from GQ references rather than
