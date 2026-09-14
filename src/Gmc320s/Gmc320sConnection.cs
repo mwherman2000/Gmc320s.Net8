@@ -1,11 +1,8 @@
-using System.IO.Ports;
-using System.Threading;
-
 namespace Gmc320s;
 
 public sealed class Gmc320sConnection : IDisposable
 {
-    private readonly SerialPort _port;
+    private readonly ISerialPort _port;
     private readonly object _sync = new();
 
     public string PortName => _port.PortName;
@@ -13,16 +10,12 @@ public sealed class Gmc320sConnection : IDisposable
     public bool IsOpen => _port.IsOpen;
 
     public Gmc320sConnection(string portName, int baudRate = 115200, int readTimeoutMs = 5000, int writeTimeoutMs = 5000)
+        : this(new SystemSerialPort(portName, baudRate, readTimeoutMs, writeTimeoutMs))
     {
-        _port = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
-        {
-            ReadTimeout = readTimeoutMs,
-            WriteTimeout = writeTimeoutMs,
-            Handshake = Handshake.None,
-            DtrEnable = false,
-            RtsEnable = false
-        };
     }
+
+    /// <summary>Test seam: build a connection over a fake <see cref="ISerialPort"/> instead of a real one.</summary>
+    internal Gmc320sConnection(ISerialPort port) => _port = port;
 
     public void Open() => _port.Open();
     public void Close() { if (_port.IsOpen) _port.Close(); }
@@ -91,5 +84,27 @@ public sealed class Gmc320sConnection : IDisposable
             offset += n;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Reads a fixed-size frame from the live heartbeat stream, retrying (with an input-buffer flush between
+    /// attempts) if a read times out, the same way <see cref="Command"/> smooths over occasional non-responses.
+    /// </summary>
+    internal byte[] ReadHeartbeatFrame(int count)
+    {
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            try
+            {
+                lock (_sync) { return ReadExactly(count); }
+            }
+            catch (TimeoutException) when (attempt < MaxAttempts)
+            {
+                lock (_sync) { _port.DiscardInBuffer(); }
+                Thread.Sleep(RetryDelayMs);
+            }
+        }
+
+        throw new TimeoutException($"Timed out reading {count} live CPS bytes after {MaxAttempts} attempts.");
     }
 }

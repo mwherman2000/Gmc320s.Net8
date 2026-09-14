@@ -8,7 +8,6 @@ public sealed class Gmc320sClient : IDisposable
 {
     private readonly Gmc320sConnection _connection;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private bool _heartbeatEnabled;
 
     public Gmc320sClient(Gmc320sConnection connection)
     {
@@ -37,12 +36,16 @@ public sealed class Gmc320sClient : IDisposable
             onStatus?.Invoke($"Trying {candidate}...");
 
             Gmc320sClient? client = null;
+            var found = false;
             try
             {
                 client = Connect(candidate);
                 var version = await client.GetVersionAsync(cancellationToken);
                 if (version.StartsWith("GMC", StringComparison.OrdinalIgnoreCase))
+                {
+                    found = true;
                     return (client, version);
+                }
 
                 onStatus?.Invoke($"{candidate}: unexpected response '{version}'.");
             }
@@ -62,8 +65,12 @@ public sealed class Gmc320sClient : IDisposable
             {
                 onStatus?.Invoke($"{candidate}: invalid port.");
             }
-
-            client?.Dispose();
+            finally
+            {
+                // Dispose on every exit path except the successful match above (including exception types
+                // not caught here), so a partially-opened port is never left dangling.
+                if (!found) client?.Dispose();
+            }
         }
 
         throw new IOException("No GMC device found on any of the candidate ports.");
@@ -123,7 +130,58 @@ public sealed class Gmc320sClient : IDisposable
         }, cancellationToken);
 
     public async Task<GmcDeviceInfo> GetDeviceInfoAsync(CancellationToken cancellationToken = default)
-        => await ExecuteAsync(async () => new GmcDeviceInfo(await GetVersionAsync(cancellationToken), null), cancellationToken);
+    {
+        var version = await GetVersionAsync(cancellationToken);
+        var serial = await GetSerialNumberAsync(cancellationToken);
+        return new GmcDeviceInfo(version, serial);
+    }
+
+    /// <summary>Returns the device's serial number as a 14-character hex string.</summary>
+    public async Task<string> GetSerialNumberAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => Convert.ToHexString(_connection.Command("GETSERIAL", 7)), cancellationToken);
+
+    /// <summary>Powers the device off. The device does not acknowledge this command.</summary>
+    public async Task PowerOffAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => _connection.Send("POWEROFF"), cancellationToken);
+
+    /// <summary>Powers the device on (firmware 5.71+). The device does not acknowledge this command.</summary>
+    public async Task PowerOnAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => _connection.Send("POWERON"), cancellationToken);
+
+    /// <summary>Reboots the device. The device does not acknowledge this command and the connection will be lost.</summary>
+    public async Task RebootAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => _connection.Send("REBOOT"), cancellationToken);
+
+    /// <summary>Resets the device to factory defaults. The device does not acknowledge this command.</summary>
+    public async Task FactoryResetAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => _connection.Send("FACTORYRESET"), cancellationToken);
+
+    /// <summary>Simulates pressing one of the device's four physical buttons (keys 0-3, i.e. S1-S4).</summary>
+    public async Task PressKeyAsync(int key, CancellationToken cancellationToken = default)
+    {
+        if (key is < 0 or > 3) throw new ArgumentOutOfRangeException(nameof(key), "Key must be 0-3.");
+        await ExecuteAsync(() => _connection.Send($"KEY{key}"), cancellationToken);
+    }
+
+    /// <summary>Reads raw history data out of the device's onboard flash storage.</summary>
+    /// <param name="address">Zero-based flash address (0-0xFFFFFF).</param>
+    /// <param name="length">Number of bytes to read (1-4096).</param>
+    /// <param name="cancellationToken"></param>
+    /// <remarks>The SPIR length encoding (actual length minus one) is protocol-derived and not yet verified against physical hardware.</remarks>
+    public async Task<byte[]> GetHistoryAsync(int address, int length, CancellationToken cancellationToken = default)
+    {
+        if (address is < 0 or > 0xFFFFFF) throw new ArgumentOutOfRangeException(nameof(address), "Address must fit in 24 bits.");
+        if (length is <= 0 or > 4096) throw new ArgumentOutOfRangeException(nameof(length), "Length must be 1-4096.");
+
+        var encodedLength = length - 1;
+        var payload = new byte[]
+        {
+            (byte)(address >> 16), (byte)(address >> 8), (byte)address,
+            (byte)(encodedLength >> 8), (byte)encodedLength
+        };
+
+        return await ExecuteAsync(() => _connection.CommandWithPayload("SPIR", payload, length), cancellationToken);
+    }
 
     public async Task<GmcReading> ReadAsync(CancellationToken cancellationToken = default)
     {
@@ -132,19 +190,26 @@ public sealed class Gmc320sClient : IDisposable
     }
 
     /// <summary>Enables the device heartbeat and yields one CPS value approximately each second.</summary>
+    /// <remarks>
+    /// A dropped or delayed heartbeat frame is retried the same way commands retry transient timeouts (see
+    /// <see cref="Gmc320sConnection.ReadHeartbeatFrame"/>). Each read runs on a background thread
+    /// so it never blocks the caller, but cancellation still can't interrupt a read already in flight - in the
+    /// worst case (the device stops responding entirely) stopping takes up to the connection's read timeout.
+    /// </remarks>
     public async IAsyncEnumerable<int> ReadCpsAsync(int? count = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (count is < 0) throw new ArgumentOutOfRangeException(nameof(count), "Count must be non-negative.");
+
         await _gate.WaitAsync(cancellationToken);
         try
         {
             _connection.Clear();
             _connection.Send("HEARTBEAT1");
-            _heartbeatEnabled = true;
             var i = 0;
             while (!count.HasValue || i++ < count.Value)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var b = _connection.ReadExactly(2);
+                var b = await Task.Run(() => _connection.ReadHeartbeatFrame(2), cancellationToken);
                 yield return BinaryPrimitives.ReadUInt16BigEndian(b) & 0x3FFF;
             }
         }
@@ -164,8 +229,9 @@ public sealed class Gmc320sClient : IDisposable
         throw new NotSupportedException("µSv/h conversion is firmware/configuration dependent. Use CPM directly or supply a verified calibration model.");
     }
 
-    public async Task<byte[]> GetRawConfigAsync(CancellationToken cancellationToken = default)
-        => await ExecuteAsync(() => _connection.Command("GETCFG", 256), cancellationToken);
+    /// <summary>Reads and parses the device's 256-byte configuration blob. See <see cref="GmcConfigParser"/> for what's decoded.</summary>
+    public async Task<GmcConfig> GetConfigAsync(CancellationToken cancellationToken = default)
+        => await ExecuteAsync(() => GmcConfigParser.Parse(_connection.Command("GETCFG", 256)), cancellationToken);
 
     public async Task<byte[]> SendRawAsync(string command, int expectedBytes, CancellationToken cancellationToken = default)
     {
@@ -187,17 +253,15 @@ public sealed class Gmc320sClient : IDisposable
         finally { _gate.Release(); }
     }
 
-    private async Task<T> ExecuteAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
-    {
-        await _gate.WaitAsync(cancellationToken);
-        try { return await action(); }
-        finally { _gate.Release(); }
-    }
-
     private void TryDisableHeartbeat()
     {
         if (!_connection.IsOpen) return;
-        try { _connection.Send("HEARTBEAT0"); _connection.Clear(); _heartbeatEnabled = false; } catch { }
+        // Best-effort cleanup: only swallow the failure modes we expect from writing to a port that may be
+        // mid-close or unresponsive. Anything else (a real bug) should still surface.
+        try { _connection.Send("HEARTBEAT0"); _connection.Clear(); }
+        catch (TimeoutException) { }
+        catch (IOException) { }
+        catch (InvalidOperationException) { }
     }
 
     public void Dispose()

@@ -13,4 +13,7 @@
   <ItemGroup>
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Gmc320s.Tests" />
+  </ItemGroup>
 </Project>
