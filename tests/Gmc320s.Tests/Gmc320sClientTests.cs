@@ -76,6 +76,48 @@ public class Gmc320sClientTests
     }
 
     [Fact]
+    public async Task GetTemperatureCelsiusAsync_RejectsTheKnownBad85DegreesAndReReads()
+    {
+        // 85.0 C is the classic power-on-reset default of digital temperature sensors and is far outside
+        // this device's operating range, so it must never reach the caller when a good read is available.
+        var port = new FakeSerialPort
+        {
+            ReplyTriggerPrefix = "<GETTEMP",
+            ReplyPayload = new byte[] { 0x55, 0x00, 0x00, 0xAA },
+            SwitchToPayloadAfterMatchingWrites = 1,
+            NextReplyPayload = new byte[] { 0x16, 0x00, 0x00, 0xAA }
+        };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        Assert.Equal(22.0, await client.GetTemperatureCelsiusAsync(), 3);
+    }
+
+    [Fact]
+    public async Task GetTemperatureCelsiusAsync_ThrowsRatherThanReturnAPersistentlyBadReading()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { 0x55, 0x00, 0x00, 0xAA } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(() => client.GetTemperatureCelsiusAsync());
+
+        Assert.Contains("85.0", ex.Message);
+        Assert.Equal(3, port.WrittenFrames.Count(f => f.Length > 2 && f[1] == 'G' && f[2] == 'E'));
+    }
+
+    [Theory]
+    [InlineData(0x00, 0x00, 0x00, 0.0)]    // freezing point of nothing in particular, but a valid reading
+    [InlineData(0x32, 0x00, 0x00, 50.0)]   // top of the device's specified ambient range
+    [InlineData(0x0A, 0x05, 0x01, -10.5)]  // genuine sub-zero reading, sign flag set over a real magnitude
+    public async Task GetTemperatureCelsiusAsync_AcceptsPlausibleReadingsIncludingNegatives(byte whole, byte tenths, byte sign, double expected)
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { whole, tenths, sign, 0xAA } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        Assert.Equal(expected, await client.GetTemperatureCelsiusAsync(), 3);
+        Assert.Single(port.WrittenFrames, f => f.Length > 2 && f[1] == 'G' && f[2] == 'E');
+    }
+
+    [Fact]
     public async Task GetTemperatureCelsiusAsync_DoesNotReReadAValidReading()
     {
         var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETTEMP", ReplyPayload = new byte[] { 0x1B, 0x06, 0x00, 0xAA } };

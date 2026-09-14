@@ -93,24 +93,51 @@ public sealed class Gmc320sClient : IDisposable
     /// <list type="bullet">
     /// <item>Values run roughly 5-6 °C above room temperature. That is self-heating inside a USB-powered
     /// enclosure, not a decoding error - the encoding is plain binary and was verified as such.</item>
-    /// <item>The sensor occasionally answers with an impossible "negative zero" (sign flag set, zero
-    /// magnitude), seen roughly once in thirty reads. That single reply is rejected and re-read here.
-    /// Otherwise consecutive reads are byte-identical, so no general double-read is needed; a value that
-    /// disagrees with a moments-earlier one reflects genuine thermal lag, which re-reading cannot fix.</item>
+    /// <item>The sensor occasionally answers with a known-bad value - an impossible "negative zero" (sign
+    /// flag set over zero magnitude), or 85.0 °C, the classic power-on-reset default of digital temperature
+    /// sensors. Both are rejected and re-read, up to three attempts, so callers never silently receive one.
+    /// If every attempt is implausible an <see cref="InvalidDataException"/> is thrown rather than a wrong
+    /// number being returned.</item>
+    /// <item>Beyond those, consecutive reads are byte-identical, so no general double-read is needed; a value
+    /// that disagrees with a moments-earlier one reflects genuine thermal lag, which re-reading cannot fix.</item>
     /// </list>
     /// </remarks>
+    /// <exception cref="InvalidDataException">Every attempt returned an implausible reading.</exception>
     public async Task<double> GetTemperatureCelsiusAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {
-            var b = _connection.Command("GETTEMP", 4);
-            if (IsNotReady(b)) b = _connection.Command("GETTEMP", 4);
+            byte[] reply = [];
+            for (var attempt = 1; attempt <= TemperatureAttempts; attempt++)
+            {
+                reply = _connection.Command("GETTEMP", 4);
+                var celsius = DecodeTemperature(reply);
+                if (IsPlausible(reply, celsius)) return celsius;
+            }
 
-            var sign = b[2] == 0 ? 1 : -1;
-            return sign * (b[0] + b[1] / 10.0);
+            throw new InvalidDataException(
+                $"GETTEMP returned an implausible reading on all {TemperatureAttempts} attempts (last reply: " +
+                $"{Convert.ToHexString(reply)}, decoded as {DecodeTemperature(reply):F1} °C). The sensor reports " +
+                "known-bad values occasionally; a persistent one suggests the sensor is faulty or this firmware " +
+                "encodes temperature differently. Use SendRawAsync(\"GETTEMP\", 4) to inspect the raw reply.");
         }, cancellationToken);
 
-    /// <summary>Detects the device's "-0.0 °C" not-ready reply: the sign flag set over a zero magnitude, which is never a real reading.</summary>
-    private static bool IsNotReady(byte[] reply) => reply[0] == 0 && reply[1] == 0 && reply[2] != 0;
+    private const int TemperatureAttempts = 3;
+
+    // The device is specified for roughly 0-50 °C ambient and reads ~5-6 °C high from self-heating, so this
+    // range is deliberately far wider than any genuine reading while still excluding the known-bad 85.0 °C.
+    private const double MinPlausibleCelsius = -20.0;
+    private const double MaxPlausibleCelsius = 70.0;
+
+    private static double DecodeTemperature(byte[] reply) => (reply[2] == 0 ? 1 : -1) * (reply[0] + reply[1] / 10.0);
+
+    private static bool IsPlausible(byte[] reply, double celsius)
+    {
+        // "-0.0 °C": the sign flag set over a zero magnitude, which is never a real reading. This one is
+        // recognised structurally rather than by value, having been captured raw as 00 00 01 AA.
+        if (reply[0] == 0 && reply[1] == 0 && reply[2] != 0) return false;
+
+        return celsius is >= MinPlausibleCelsius and <= MaxPlausibleCelsius;
+    }
 
     public async Task<DateTime> GetDateTimeAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
