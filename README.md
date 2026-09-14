@@ -20,7 +20,7 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
 - `KEY0`-`KEY3` simulated button presses
-- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`)
+- `SPIR` raw history readout from onboard flash (`GetHistoryAsync`), plus a heuristic probe for where logged data ends and erased flash begins (`FindHistoryEndAsync`)
 - RFC1201 heartbeat (`HEARTBEAT1` / `HEARTBEAT0`)
 - Continuous CPS stream
 - Raw command access (`SendRawAsync`)
@@ -75,6 +75,30 @@ The GMC-320S has no time zone or daylight-saving awareness — its RTC just hold
 ```csharp
 await gmc.SetDateTimeAsync(DateTime.Now);
 ```
+
+### Finding where the flash history ends
+
+```csharp
+var end = await gmc.FindHistoryEndAsync();
+Console.WriteLine(end is int e ? $"Logged data ends around 0x{e:X6}." : "No erased-flash gap found in the scanned range.");
+```
+
+This is a heuristic, not a protocol-documented answer: it reads flash forward in chunks looking for the first long run of `0xFF` bytes (erased flash), since GQ has never published where the real log data ends. See [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) for the caveats.
+
+**Real hardware example.** Against an actual GMC-320S, `FindHistoryEndAsync()` returned `0x01A3B7` (107447) quickly — nowhere near the full 1MB scan bound — and the first 16 bytes read from address 0 were:
+
+```
+55AA001A07150C272355AA0155AA001A
+```
+
+No `0xFF` appears at all; instead there's a repeating `55 AA` prefix, which reads as a marker/sync sequence rather than the `0xFF`-based marker scheme this library originally guessed at (see [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md)). Splitting it up:
+
+```
+55 AA 00 1A 07 15 0C 27 23   55 AA 01   55 AA 00 1A
+└─ sync ┘  └── payload ───┘  └sync┘└┘   └─ sync ┘
+```
+
+`55 AA 00` followed by `1A 07 15 0C 27 23` decodes suspiciously well as a timestamp entry using the same YY/MM/DD/HH/MM/SS layout as `GETDATETIME`/`SETDATETIME`: `26 07 21 12 39 35` → 2026-07-21 12:39:35. `55 AA 01` then appears to carry no payload before the next marker starts. This is one observed sample, not a verified spec — nothing in the library decodes history entries based on it yet.
 
 ## Console test
 

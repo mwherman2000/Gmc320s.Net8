@@ -183,6 +183,59 @@ public sealed class Gmc320sClient : IDisposable
         return await ExecuteAsync(() => _connection.CommandWithPayload("SPIR", payload, length), cancellationToken);
     }
 
+    /// <summary>
+    /// Reads flash forward in chunks from <paramref name="startAddress"/>, looking for where logged history
+    /// ends and erased (unwritten) flash begins, and returns the address of the first byte of that gap.
+    /// </summary>
+    /// <param name="startAddress">Address to start scanning from (0-0xFFFFFF).</param>
+    /// <param name="maxAddress">
+    /// Upper bound of the scan, exclusive. Defaults to 0x100000 (1MB), the commonly cited GMC-320 flash size -
+    /// unverified against physical hardware, so pass a larger value if your device holds more.
+    /// </param>
+    /// <param name="chunkSize">Bytes read per <see cref="GetHistoryAsync"/> call (1-4096).</param>
+    /// <param name="minErasedRunLength">
+    /// How many consecutive 0xFF bytes count as "erased flash" rather than coincidental 0xFF bytes inside a real
+    /// log entry (0xFF is also used as a marker byte for special entries - see <c>PROTOCOL-NOTES.md</c>). Longer
+    /// reduces false positives at the risk of overshooting past a genuine gap into more written data.
+    /// </param>
+    /// <returns>The address where the erased-flash run starts, or <see langword="null"/> if none was found before <paramref name="maxAddress"/>.</returns>
+    public async Task<int?> FindHistoryEndAsync(
+        int startAddress = 0, int maxAddress = 0x100000, int chunkSize = 4096, int minErasedRunLength = 64,
+        CancellationToken cancellationToken = default)
+    {
+        if (startAddress is < 0 or > 0xFFFFFF) throw new ArgumentOutOfRangeException(nameof(startAddress), "Address must fit in 24 bits.");
+        if (maxAddress <= startAddress) throw new ArgumentOutOfRangeException(nameof(maxAddress), "Must be greater than startAddress.");
+        if (chunkSize is <= 0 or > 4096) throw new ArgumentOutOfRangeException(nameof(chunkSize), "Chunk size must be 1-4096.");
+        if (minErasedRunLength <= 0) throw new ArgumentOutOfRangeException(nameof(minErasedRunLength), "Must be positive.");
+
+        var address = startAddress;
+        var runStart = -1;
+        var runLength = 0;
+
+        while (address < maxAddress)
+        {
+            var length = Math.Min(chunkSize, maxAddress - address);
+            var chunk = await GetHistoryAsync(address, length, cancellationToken);
+
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                if (chunk[i] == 0xFF)
+                {
+                    if (runLength == 0) runStart = address + i;
+                    if (++runLength >= minErasedRunLength) return runStart;
+                }
+                else
+                {
+                    runLength = 0;
+                }
+            }
+
+            address += length;
+        }
+
+        return null;
+    }
+
     public async Task<GmcReading> ReadAsync(CancellationToken cancellationToken = default)
     {
         var cpm = await GetCpmAsync(cancellationToken);

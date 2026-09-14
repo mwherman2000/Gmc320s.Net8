@@ -67,6 +67,66 @@ public class Gmc320sClientTests
     }
 
     [Fact]
+    public async Task FindHistoryEndAsync_FindsFirstLongRunOfErasedBytes()
+    {
+        var flash = new byte[2048];
+        for (var i = 0; i < 100; i++) flash[i] = (byte)(i % 50 + 1); // "real" log data, never 0xFF
+        for (var i = 100; i < flash.Length; i++) flash[i] = 0xFF; // erased flash
+
+        var port = new FakeSerialPort { FlashImage = flash };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var end = await client.FindHistoryEndAsync(maxAddress: flash.Length, chunkSize: 256, minErasedRunLength: 64);
+
+        Assert.Equal(100, end);
+    }
+
+    [Fact]
+    public async Task FindHistoryEndAsync_ReturnsNullWhenNoGapFound()
+    {
+        var flash = new byte[512];
+        for (var i = 0; i < flash.Length; i++) flash[i] = (byte)(i % 50 + 1);
+
+        var port = new FakeSerialPort { FlashImage = flash };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var end = await client.FindHistoryEndAsync(maxAddress: flash.Length, chunkSize: 128, minErasedRunLength: 64);
+
+        Assert.Null(end);
+    }
+
+    [Fact]
+    public async Task FindHistoryEndAsync_IgnoresMarkerBytesShorterThanThreshold()
+    {
+        var flash = new byte[512];
+        for (var i = 0; i < flash.Length; i++) flash[i] = 1;
+        flash[50] = 0xFF; flash[51] = 0xFF; flash[52] = 0xFF; // short marker-like run, below threshold
+        for (var i = 200; i < flash.Length; i++) flash[i] = 0xFF; // genuine gap
+
+        var port = new FakeSerialPort { FlashImage = flash };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var end = await client.FindHistoryEndAsync(maxAddress: flash.Length, chunkSize: 128, minErasedRunLength: 10);
+
+        Assert.Equal(200, end);
+    }
+
+    [Fact]
+    public async Task FindHistoryEndAsync_CountsErasedRunAcrossChunkBoundary()
+    {
+        var flash = new byte[256];
+        for (var i = 0; i < flash.Length; i++) flash[i] = 1;
+        for (var i = 110; i < 150; i++) flash[i] = 0xFF; // straddles the 128-byte chunk boundary
+
+        var port = new FakeSerialPort { FlashImage = flash };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var end = await client.FindHistoryEndAsync(maxAddress: flash.Length, chunkSize: 128, minErasedRunLength: 40);
+
+        Assert.Equal(110, end);
+    }
+
+    [Fact]
     public async Task ReadCpsAsync_RecoversFromOneDroppedHeartbeatFrame()
     {
         var port = new FakeSerialPort();

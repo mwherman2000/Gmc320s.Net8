@@ -78,8 +78,19 @@ internal class Program
                 var config = await gmc.GetConfigAsync(cts.Token);
                 System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
 
-                var history = await gmc.GetHistoryAsync(0, 16, cts.Token);
-                System.Console.WriteLine($"History[0..16): {Convert.ToHexString(history)}");
+                const int historyLength = 4096; // max chunk GetHistoryAsync/SPIR supports per call
+                var history = await gmc.GetHistoryAsync(0, historyLength, cts.Token);
+                var historyEnd = await gmc.FindHistoryEndAsync(cancellationToken: cts.Token);
+
+                const int hexPreviewBytes = 64;
+                var hexPreview = Convert.ToHexString(history, 0, Math.Min(hexPreviewBytes, history.Length));
+                System.Console.WriteLine($"History[0..{historyLength}): {hexPreview}{(history.Length > hexPreviewBytes ? "..." : "")}  (log end: {(historyEnd is int e ? $"0x{e:X6} / {e}" : "not found")})");
+                System.Console.WriteLine(historyEnd is int usedBytes
+                    ? $"Estimated readings available: ~{usedBytes} (best guess, assuming ~1 byte/reading; actual count is somewhat lower due to periodic timestamp/marker overhead)"
+                    : "Estimated readings available: unknown (no erased-flash boundary found within the scanned range)");
+
+                foreach (var entry in GmcHistoryParser.Parse(history).Entries.Take(100))
+                    System.Console.WriteLine($"  {entry}");
 
                 if (keyToPress.HasValue)
                 {

@@ -26,6 +26,13 @@ internal sealed class FakeSerialPort : ISerialPort
     public byte[]? ReplyPayload { get; set; }
     public int FailMatchingWritesBeforeReply { get; set; }
 
+    /// <summary>
+    /// When set, simulates a real flash chip for SPIR reads: decodes the address/length out of each written
+    /// SPIR frame and replies with the corresponding slice, padded with 0xFF (erased flash) past the image's
+    /// end. Independent of <see cref="ReplyTriggerPrefix"/>, so it doesn't affect other commands.
+    /// </summary>
+    public byte[]? FlashImage { get; set; }
+
     public string PortName => "FAKE";
     public int BaudRate => 115200;
     public bool IsOpen { get; private set; } = true;
@@ -48,6 +55,18 @@ internal sealed class FakeSerialPort : ISerialPort
         var frame = new byte[count];
         Array.Copy(buffer, offset, frame, 0, count);
         WrittenFrames.Add(frame);
+
+        if (FlashImage is not null && frame.Length >= 10 && frame[0] == '<' && frame[1] == 'S' && frame[2] == 'P' && frame[3] == 'I' && frame[4] == 'R')
+        {
+            var address = (frame[5] << 16) | (frame[6] << 8) | frame[7];
+            var length = ((frame[8] << 8) | frame[9]) + 1;
+            for (var i = 0; i < length; i++)
+            {
+                var srcIndex = address + i;
+                _incoming.Enqueue(srcIndex < FlashImage.Length ? FlashImage[srcIndex] : (byte)0xFF);
+            }
+            return;
+        }
 
         if (ReplyTriggerPrefix is null || ReplyPayload is null) return;
         if (!Encoding.ASCII.GetString(frame).StartsWith(ReplyTriggerPrefix, StringComparison.Ordinal)) return;
