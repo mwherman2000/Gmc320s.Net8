@@ -27,9 +27,9 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETVER`
 - `GETCPM`
 - `GETVOLT`
-- `GETTEMP`
+- `GETTEMP` (but see [Unreliable on this model](#unreliable-on-this-model-gettemp-and-getgyro))
 - `GETDATETIME` / `SETDATETIME`
-- `GETGYRO`
+- `GETGYRO` (but see [Unreliable on this model](#unreliable-on-this-model-gettemp-and-getgyro))
 - `GETCFG` configuration readout, with the well-documented leading bytes parsed into `GmcConfig.Values` (raw 256-byte blob still available via `GmcConfig.Raw`)
 - `GETSERIAL` device serial number
 - `POWEROFF` / `POWERON` (firmware 5.71+) / `REBOOT` / `FACTORYRESET`
@@ -51,6 +51,12 @@ Configuration-editing commands: `ECFG`/`WCFG`/`CFGUPDATE` (writing individual co
 ## Reliability
 
 `Gmc320sConnection` retries a command up to 3 times (with a short delay and input-buffer flush between attempts) if a read times out, to smooth over occasional non-responses from the device. A persistent failure (device off, wrong port, cable unplugged) still surfaces as a `TimeoutException` after all attempts are exhausted. The live CPS heartbeat stream (`ReadCpsAsync`) gets the same per-frame retry treatment. See [BACKLOG.md](BACKLOG.md) for making the attempt count/delay configurable.
+
+## Unreliable on this model: `GETTEMP` and `GETGYRO`
+
+Both commands exist in RFC1201 and this library implements them, but on a real GMC-320S (firmware `GMC-320SRe 1.1`) neither returns believable data. Temperature read 85.0 °C on most attempts — note 85 is `0x55` — against a single plausible-looking 22.7 °C, and gyro values cluster on suspiciously round numbers (`Z = 0xC000`, X/Y always small multiples of 16).
+
+Temperature and gyroscope hardware appear to be GMC-320+ / 500-series features, so the likeliest explanation is that this model answers both commands with undefined data and the one believable temperature was the coincidence. Treat both as unreliable here until someone dumps the raw reply bytes across several reads (via `SendRawAsync`) and establishes whether they're constant junk or genuinely varying.
 
 ## Known limitation: sharing a connection across clients
 
@@ -144,6 +150,19 @@ No `0xFF` appears at all; instead there's a repeating `55 AA` prefix, which read
 ```
 
 `55 AA 00` followed by `1A 07 15 0C 27 23` decodes suspiciously well as a timestamp entry using the same YY/MM/DD/HH/MM/SS layout as `GETDATETIME`/`SETDATETIME`: `26 07 21 12 39 35` → 2026-07-21 12:39:35. `55 AA 01` then appears to carry no payload before the next marker starts. `GmcHistoryParser` decodes exactly this (see below); it stops rather than guess at any other marker type.
+
+**Confirmed exactly, after a factory reset wiped the log.** Reading the fresh log from address 0 gave a measurement the ~110K-entry log couldn't:
+
+```
+55AA00 1A090E0B321D  → 11:50:29   anchor
+55AA01                            marker
+55AA00 1A090E0B321D  → 11:50:29   anchor again - zero readings in between
+55AA01
+000000000000000000000000          12 readings
+55AA00 1A090E0B3229  → 11:50:41   anchor
+```
+
+Twelve readings between timestamps exactly twelve seconds apart is **1.00 reading/second**, which turns the `Count`-not-`Cpm` naming from an inference into a measured fact. Note also the batch lengths here — **0, then 12**, against the ~180 between undisturbed anchors. That is why nothing in this library derives entry positions from an assumed batch length.
 
 **A second finding, from scanning much further into the same device's log:** a `55 AA 00` timestamp+marker pair recurs every **exactly 182 entries** — repeated ~379 times across roughly 69,000 entries — with consecutive timestamps consistently **179 seconds apart** (occasional 178/180s jitter from whole-second RTC rounding). 182 entries = timestamp + marker + 180 plain readings, and 180 readings in ~179 seconds is ~1 reading/second. That's why `GmcHistoryReading`'s field is named `Count`, not `Cpm`: a true 60-second rolling CPM wouldn't fluctuate the way these per-entry values do, but the magnitude and volatility line up with the live `HEARTBEAT1` CPS stream from the same device. Treat this as a strong inference from timing, not a documented fact — see [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md).
 

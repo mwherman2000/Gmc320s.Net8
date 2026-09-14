@@ -88,6 +88,11 @@ public sealed class Gmc320sClient : IDisposable
     public async Task<double> GetVoltageAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => _connection.Command("GETVOLT", 1)[0] / 10.0, cancellationToken);
 
+    /// <remarks>
+    /// Unreliable on the GMC-320S: repeated reads on firmware <c>GMC-320SRe 1.1</c> mostly returned 85.0 °C
+    /// (85 = <c>0x55</c>) rather than anything plausible. Temperature hardware appears to be a GMC-320+ /
+    /// 500-series feature, so this model likely answers the command with undefined data. See PROTOCOL-NOTES.md.
+    /// </remarks>
     public async Task<double> GetTemperatureCelsiusAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {
@@ -122,6 +127,11 @@ public sealed class Gmc320sClient : IDisposable
         }, cancellationToken);
     }
 
+    /// <remarks>
+    /// Unreliable on the GMC-320S: values on firmware <c>GMC-320SRe 1.1</c> cluster on suspiciously round
+    /// numbers (<c>Z = 0xC000</c>, X/Y always small multiples of 16), suggesting no gyroscope hardware and an
+    /// undefined reply. Gyro appears to be a GMC-320+ / 500-series feature. See PROTOCOL-NOTES.md.
+    /// </remarks>
     public async Task<GmcGyro> GetGyroAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {

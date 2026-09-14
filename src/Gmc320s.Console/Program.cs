@@ -119,6 +119,9 @@ internal class Program
                 System.Console.WriteLine($"Device time: {await gmc.GetDateTimeAsync(cts.Token):yyyy-MM-dd HH:mm:ss}");
                 System.Console.WriteLine($"Serial: {await gmc.GetSerialNumberAsync(cts.Token)}");
 
+                var gyro = await gmc.GetGyroAsync(cts.Token);
+                System.Console.WriteLine($"Gyro: X={gyro.X} Y={gyro.Y} Z={gyro.Z}");
+
                 var config = await gmc.GetConfigAsync(cts.Token);
                 System.Console.WriteLine($"Config: {string.Join(", ", config.Values.Select(kv => $"{kv.Key}={kv.Value}"))}");
 
