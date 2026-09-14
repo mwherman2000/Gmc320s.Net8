@@ -174,6 +174,11 @@ public sealed class Gmc320sClient : IDisposable
     /// reads about -16384 (-1 g) while X and Y sit within a few hundred counts of zero, which is a tilt of
     /// roughly a degree. Divide by 16384.0 to get g. See PROTOCOL-NOTES.md for the measurements.
     /// </para>
+    /// <para>
+    /// That scale is only accurate for Z. Measuring the gravity magnitude with each axis vertical in turn
+    /// gave ~1.00 g for Z, 0.983 g for X and 0.959 g for Y, so X reads ~1.7% low and Y ~4.1% low. Fine for
+    /// coarse orientation; calibrate each axis separately for precise tilt work.
+    /// </para>
     /// </remarks>
     public async Task<GmcGyro> GetGyroAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>

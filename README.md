@@ -86,7 +86,17 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 
   Six stationary samples make the scale exact. Every component is a multiple of 16, so the sensor is **12-bit left-shifted into a 16-bit field** (4096 effective steps over ±2 g) — that's what made the numbers look suspiciously round. After the shift Z lands on −1024 = −2¹⁰, i.e. −1 g. The clincher is the vector magnitude, which came to 0.991-1.020 g across all six: a stationary accelerometer *must* read 1 g since gravity never switches off, while a stationary gyroscope would read zero on every axis.
 
-  Lying flat, X and Y within a few hundred counts of zero corresponds to under ~1° of tilt. Stand the device on edge and Z should collapse toward zero while whichever axis is now vertical swings to ≈ ±16384.
+  Lying flat, X and Y within a few hundred counts of zero corresponds to under ~1° of tilt. Standing the device on edge confirmed the scale out-of-sample: Z collapsed to 0.071 g while Y rose to 0.956 g, and the implied lean of **4.4°** matched the ~5° the device was visibly tilted — a correct angle recovered from an orientation the scale factor was never fitted to.
+
+  **Caveat for precise work: 16384 counts per g is only accurate for Z.** Magnitude must be 1.000 g at any orientation, so measuring it with each axis vertical in turn isolates that axis's gain:
+
+  | Dominant axis | Magnitude | Gain error |
+  |---|---|---|
+  | Z (flat) | 0.991-1.020 g | ~0% (reference) |
+  | X (on edge) | 0.983 g | ~1.7% low |
+  | Y (other edge) | 0.959 g | ~4.1% low |
+
+  The part is loosely trimmed overall, with Y clearly the worst — routine for a cheap 12-bit accelerometer. Tilt can't account for it: the X reading was within 0.43° of vertical and still 1.7% low. For coarse "which way is up" the single scale is fine; for precise tilt work, calibrate each axis separately.
 
 ## Known limitation: sharing a connection across clients
 
