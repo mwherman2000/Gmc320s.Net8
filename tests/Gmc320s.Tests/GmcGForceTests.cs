@@ -2,12 +2,12 @@ using Xunit;
 
 namespace Gmc320s.Tests;
 
-public class GmcOrientationTests
+public class GmcGForceTests
 {
     [Fact]
     public void ConvertsCountsToG()
     {
-        var o = new GmcOrientation(16384, -8192, 0);
+        var o = new GmcGForce(16384, -8192, 0);
 
         Assert.Equal(1.0, o.XG, 6);
         Assert.Equal(-0.5, o.YG, 6);
@@ -25,7 +25,7 @@ public class GmcOrientationTests
     [InlineData(-976, -15760, -160)]   // Y down
     public void MotionlessReadingsAreStableInEveryOrientation(short x, short y, short z)
     {
-        var o = new GmcOrientation(x, y, z);
+        var o = new GmcGForce(x, y, z);
 
         Assert.True(o.IsStable, $"|g| = {o.Magnitude:F4} should count as still");
     }
@@ -39,7 +39,7 @@ public class GmcOrientationTests
     [InlineData(-3056, -2848, 13792)]    // 0.88 g - only just outside tolerance
     public void MovingReadingsAreNotStable(short x, short y, short z)
     {
-        var o = new GmcOrientation(x, y, z);
+        var o = new GmcGForce(x, y, z);
 
         Assert.False(o.IsStable, $"|g| = {o.Magnitude:F4} should count as moving");
     }
@@ -48,9 +48,9 @@ public class GmcOrientationTests
     public void MagnitudeIsOrientationIndependentForAnIdealSensor()
     {
         // Same 1 g vector pointed three different ways; magnitude must not care which.
-        var down = new GmcOrientation(0, 0, -16384);
-        var edge = new GmcOrientation(0, 16384, 0);
-        var tilted = new GmcOrientation(11586, 11586, 0); // 1 g split evenly across two axes
+        var down = new GmcGForce(0, 0, -16384);
+        var edge = new GmcGForce(0, 16384, 0);
+        var tilted = new GmcGForce(11586, 11586, 0); // 1 g split evenly across two axes
 
         Assert.Equal(1.0, down.Magnitude, 3);
         Assert.Equal(1.0, edge.Magnitude, 3);
@@ -60,7 +60,7 @@ public class GmcOrientationTests
     [Fact]
     public void FreeFallReadsZero()
     {
-        var o = new GmcOrientation(0, 0, 0);
+        var o = new GmcGForce(0, 0, 0);
 
         Assert.Equal(0.0, o.Magnitude, 6);
         Assert.False(o.IsStable);
@@ -79,7 +79,7 @@ public class GmcOrientationTests
         }));
 
     [Fact]
-    public async Task GetStableOrientationAsync_AveragesAgreeingSamples()
+    public async Task GetStableGForceAsync_AveragesAgreeingSamples()
     {
         using var client = ClientReplying(
             Reply(288, 48, -16288),
@@ -87,7 +87,7 @@ public class GmcOrientationTests
             Reply(304, 48, -16320),
             Reply(288, 64, -16304));
 
-        var o = await client.GetStableOrientationAsync();
+        var o = await client.GetStableGForceAsync();
 
         Assert.True(o.IsStable);
         Assert.Equal(288, o.X);   // mean of 288, 272, 304, 288
@@ -96,7 +96,7 @@ public class GmcOrientationTests
     }
 
     [Fact]
-    public async Task GetStableOrientationAsync_WaitsOutMotionThenReturnsTheSettledReading()
+    public async Task GetStableGForceAsync_WaitsOutMotionThenReturnsTheSettledReading()
     {
         // The first three are real shake-capture samples, including one at 0.968 g that a single-sample
         // IsStable check would wrongly accept. Only the settled run afterwards should be returned.
@@ -109,14 +109,14 @@ public class GmcOrientationTests
             Reply(304, 48, -16320),
             Reply(288, 64, -16304));
 
-        var o = await client.GetStableOrientationAsync();
+        var o = await client.GetStableGForceAsync();
 
         Assert.Equal(-16316, o.Z);
         Assert.True(o.IsStable);
     }
 
     [Fact]
-    public async Task GetStableOrientationAsync_RejectsSamplesThatAreNearOneGButDisagree()
+    public async Task GetStableGForceAsync_RejectsSamplesThatAreNearOneGButDisagree()
     {
         // Every sample sits close to 1 g, so each passes IsStable individually - but they point in wildly
         // different directions, which is exactly the case a single-sample check cannot catch.
@@ -126,21 +126,21 @@ public class GmcOrientationTests
             Reply(0, 0, 16384),
             Reply(-16384, 0, 0));
 
-        await Assert.ThrowsAsync<TimeoutException>(() => client.GetStableOrientationAsync(maxSamples: 8));
+        await Assert.ThrowsAsync<TimeoutException>(() => client.GetStableGForceAsync(maxSamples: 8));
     }
 
     [Fact]
-    public async Task GetStableOrientationAsync_ThrowsWhenTheDeviceNeverSettles()
+    public async Task GetStableGForceAsync_ThrowsWhenTheDeviceNeverSettles()
     {
         using var client = ClientReplying(Reply(-16352, -11408, 31200)); // 2.26 g, repeated
 
-        await Assert.ThrowsAsync<TimeoutException>(() => client.GetStableOrientationAsync(maxSamples: 6));
+        await Assert.ThrowsAsync<TimeoutException>(() => client.GetStableGForceAsync(maxSamples: 6));
     }
 
     [Fact]
     public void IsStableWithinHonoursACallerSuppliedTolerance()
     {
-        var yDown = new GmcOrientation(-976, -15760, -160); // ~0.96 g, still, but 4% off from Y's gain error
+        var yDown = new GmcGForce(-976, -15760, -160); // ~0.96 g, still, but 4% off from Y's gain error
 
         Assert.True(yDown.IsStableWithin(0.10));
         Assert.False(yDown.IsStableWithin(0.01)); // too tight for this device's per-axis trim

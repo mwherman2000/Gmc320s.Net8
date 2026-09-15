@@ -129,6 +129,55 @@ public class Gmc320sClientTests
     }
 
     [Fact]
+    public async Task GetCpmAsync_ThrottlesBackToBackCallsToTheMinimumGap()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETCPM", ReplyPayload = new byte[] { 0x00, 0x0A } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        await client.GetCpmAsync(); // establishes _lastCpmReplyTimestamp; nothing to throttle against yet
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        await client.GetCpmAsync();
+        clock.Stop();
+
+        // Generous lower bound: real elapsed time can only overshoot a requested sleep, never undershoot it,
+        // so this is not a flakiness risk - only a slow CI machine adding more delay than requested.
+        Assert.True(clock.Elapsed.TotalMilliseconds >= Gmc320sClient.MinCpmRequestGapMs * 0.8,
+            $"Expected at least ~{Gmc320sClient.MinCpmRequestGapMs} ms, took {clock.Elapsed.TotalMilliseconds:F1} ms");
+    }
+
+    [Fact]
+    public async Task GetCpmAsync_DoesNotThrottleWhenTheGapHasAlreadyElapsed()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETCPM", ReplyPayload = new byte[] { 0x00, 0x0A } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        await client.GetCpmAsync();
+        await Task.Delay(Gmc320sClient.MinCpmRequestGapMs + 10);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        await client.GetCpmAsync();
+        clock.Stop();
+
+        Assert.True(clock.Elapsed.TotalMilliseconds < Gmc320sClient.MinCpmRequestGapMs,
+            $"Expected a fast call since the gap had already elapsed, took {clock.Elapsed.TotalMilliseconds:F1} ms");
+    }
+
+    [Fact]
+    public async Task GetCpmAsync_DoesNotThrottleTheFirstCallOnAFreshClient()
+    {
+        var port = new FakeSerialPort { ReplyTriggerPrefix = "<GETCPM", ReplyPayload = new byte[] { 0x00, 0x0A } };
+        using var client = new Gmc320sClient(new Gmc320sConnection(port));
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        await client.GetCpmAsync();
+        clock.Stop();
+
+        Assert.True(clock.Elapsed.TotalMilliseconds < Gmc320sClient.MinCpmRequestGapMs,
+            $"Expected the very first call to be fast, took {clock.Elapsed.TotalMilliseconds:F1} ms");
+    }
+
+    [Fact]
     public async Task GetHistoryAsync_EncodesAddressAndLengthMinusOne()
     {
         const int length = 10;

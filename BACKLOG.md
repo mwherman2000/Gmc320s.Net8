@@ -15,29 +15,32 @@ Consider:
   GMC device should answer `GETVER` quickly; the long timeout is only needed for
   flaky-but-real connections during normal use).
 
-## Consider pacing or documenting GETCPM's minimum interval
+## Resolved: GETCPM's minimum interval was measured and is now enforced
 
-`GETCPM` silently ignores a request that arrives too soon after the previous one - see
-PROTOCOL-NOTES.md for the measurements. A caller polling it in a loop therefore pays a
-full read timeout on every reading (5 s by default) and never notices, because the
-automatic retry succeeds and returns a correct value.
+Was: "GETCPM silently ignores a request that arrives too soon; document or pace it."
+Bisected with `--cpm-probe`: a 0 ms gap between calls failed roughly 80% of the time
+(paying a full 5 s read timeout before the automatic retry succeeded); every gap of 1 ms
+or more, up to 1100 ms tested, succeeded every time.
 
-`GetCpmAsync` is fine for the paced, occasional use it was written for, and the console
-app only calls it a couple of times, so nothing is broken today. But the failure mode is
-silent and expensive, which is a poor trap to leave for someone building a CPM logger.
+`GetCpmAsync` now enforces a 15 ms minimum gap internally (`Gmc320sClient.MinCpmRequestGapMs`),
+sleeping first if a previous `GETCPM` reply on this client arrived more recently than that.
+15 ms was chosen with margin above the validated-safe range rather than at its edge - see
+the XML doc on `MinCpmRequestGapMs` for why 1-2 ms specifically would have been guessing
+dressed up as a measurement (Windows timer granularity, a 5-trial sample size, and no data
+at all between 2-9 ms).
 
-Options, roughly in order of how much they presume:
-- Document the constraint on `GetCpmAsync` and leave behaviour alone. Cheapest, and
-  honest, since the exact minimum interval has not been measured.
-- Measure the actual minimum interval first (bisect the gap between calls until replies
-  stop arriving), then document a concrete figure rather than "about a second".
-- Have `GetCpmAsync` enforce a minimum spacing internally, sleeping if called too soon.
-  This trades a hidden 5 s stall for a visible short one, but it bakes in a guess about
-  the device's cadence and would surprise anyone who wants the raw behaviour.
+**Resolved: `GETVOLT` does not need a gap.** An 8-iteration benchmark had shown 1 slow call
+out of 8, ambiguous enough to warrant a real bisection rather than a guess either way.
+`--cpm-probe` was generalized into `--probe COMMAND:BYTES:GAPS` (reusable for any command)
+and run against `GETVOLT` at 0 ms three separate times (15 zero-gap calls total) plus 1, 5,
+10, 25 and 50 ms - zero stalls anywhere, only ordinary jitter (occasional ~200 ms outliers,
+nothing like GETCPM's reproducible multi-second failure). The earlier single slow call was
+noise, not a systemic discard-and-retry pattern. No gap added.
 
-Note the same question has not been asked of the other commands. Only `GETGYRO` (12 ms)
-and `GETVER` (6 ms) are known to tolerate rapid repetition; `GETVOLT`, `GETTEMP`,
-`GETSERIAL` and `GETCFG` have not been tested for a minimum interval.
+`GETSERIAL`, `GETGYRO`, `GETVER` and `GETCFG` remain clean at their previously tested
+intervals; `GETTEMP`'s slowness remains understood as real ADC conversion time, a different
+phenomenon entirely. GETCPM is therefore the only command known to need a gap - do not add
+one to anything else without measuring it the same way first.
 
 ## Unexplained: reading counts don't reconcile with elapsed time around restarts
 

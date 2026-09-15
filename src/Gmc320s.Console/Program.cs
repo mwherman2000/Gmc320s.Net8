@@ -36,10 +36,11 @@ internal class Program
     {
         int? keyToPress = null;
         var recentCount = 100;
-        var orientationSamples = 100;
+        var gforceSamples = 100;
         var fullScan = false;
         var benchmarkIterations = 0;
         var timeoutMs = 5000;
+        var probes = new List<(string Command, int ReplyBytes, int[] Gaps)>();
         var rawCommands = new List<(string Command, int Length)>();
         var positional = new List<string>();
         for (var i = 0; i < args.Length; i++)
@@ -65,12 +66,12 @@ internal class Program
 
                 i++;
             }
-            else if (args[i] == "--orientation")
+            else if (args[i] == "--gforce")
             {
                 // Defaults to 100; 0 suppresses the sample table, leaving just the single reading above it.
-                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out orientationSamples) || orientationSamples < 0)
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out gforceSamples) || gforceSamples < 0)
                 {
-                    System.Console.Error.WriteLine("Error: --orientation requires a sample count of 0 or more.");
+                    System.Console.Error.WriteLine("Error: --gforce requires a sample count of 0 or more.");
                     return 4;
                 }
 
@@ -107,6 +108,26 @@ internal class Program
                     return 4;
                 }
 
+                i++;
+            }
+            else if (args[i] == "--probe")
+            {
+                // One-off diagnostic to pin down a command's minimum polling interval, the way GETCPM's was
+                // found: COMMAND:BYTES:GAP1,GAP2,... - try each candidate gap (ms) in turn, several trials
+                // apiece, and report how many succeeded fast versus stalled. Repeatable.
+                var spec = i + 1 < args.Length ? args[i + 1].Split(':') : [];
+                var gaps = spec.Length == 3
+                    ? spec[2].Split(',').Select(s => int.TryParse(s, out var ms) && ms >= 0 ? ms : -1).ToArray()
+                    : [];
+                if (spec.Length != 3 || string.IsNullOrWhiteSpace(spec[0]) || !int.TryParse(spec[1], out var probeBytes)
+                    || probeBytes is <= 0 or > 4096 || gaps.Length == 0 || gaps.Any(g => g < 0))
+                {
+                    System.Console.Error.WriteLine(
+                        "Error: --probe requires COMMAND:BYTES:GAPS, e.g. --probe GETVOLT:1:0,1,5,10,25,50 (BYTES is 1-4096, GAPS is a comma-separated list of milliseconds).");
+                    return 4;
+                }
+
+                probes.Add((spec[0], probeBytes, gaps));
                 i++;
             }
             else if (args[i] == "--full-scan")
@@ -173,23 +194,23 @@ internal class Program
                 System.Console.WriteLine($"Voltage: {await gmc.GetVoltageAsync(cts.Token):F1} V");
                 System.Console.WriteLine($"Temperature: {await gmc.GetTemperatureCelsiusAsync(cts.Token):F1} °C  (runs ~5-6 °C above ambient; self-heating)");
 
-                var orientation = await gmc.GetOrientationAsync(cts.Token);
+                var gforce = await gmc.GetGForceAsync(cts.Token);
                 System.Console.WriteLine(
-                    $"Orientation: X={orientation.X} Y={orientation.Y} Z={orientation.Z}  =  " +
-                    $"X={orientation.XG:F3}g Y={orientation.YG:F3}g Z={orientation.ZG:F3}g, |g|={orientation.Magnitude:F3} (calculated)  " +
-                    $"[{(orientation.IsStable ? "still - axes are a valid orientation" : "MOVING - axes are motion, not orientation")}]");
+                    $"G-force: X={gforce.X} Y={gforce.Y} Z={gforce.Z}  =  " +
+                    $"X={gforce.XG:F3}g Y={gforce.YG:F3}g Z={gforce.ZG:F3}g, |g|={gforce.Magnitude:F3} (calculated)  " +
+                    $"[{(gforce.IsStable ? "still - axes are a valid orientation" : "MOVING - axes are motion, not orientation")}]");
 
-                if (orientationSamples > 0)
+                if (gforceSamples > 0)
                 {
                     System.Console.WriteLine();
-                    System.Console.WriteLine($"--- Orientation, {orientationSamples} samples ---   g and |g| are (calculated); a still device reads |g| = 1.000 whatever its orientation");
+                    System.Console.WriteLine($"--- G-force, {gforceSamples} samples ---   g and |g| are (calculated); a still device reads |g| = 1.000 whatever its orientation");
                     System.Console.WriteLine("   #        X       Y       Z         Xg       Yg       Zg      |g|  state");
 
-                    var samples = new List<GmcOrientation>(orientationSamples);
+                    var samples = new List<GmcGForce>(gforceSamples);
                     var clock = System.Diagnostics.Stopwatch.StartNew();
-                    for (var sample = 1; sample <= orientationSamples; sample++)
+                    for (var sample = 1; sample <= gforceSamples; sample++)
                     {
-                        var o = await gmc.GetOrientationAsync(cts.Token);
+                        var o = await gmc.GetGForceAsync(cts.Token);
                         samples.Add(o);
                         System.Console.WriteLine(
                             $"  {sample,2}   {o.X,6}  {o.Y,6}  {o.Z,6}   {o.XG,8:F4} {o.YG,8:F4} {o.ZG,8:F4} {o.Magnitude,8:F4}" +
@@ -201,15 +222,15 @@ internal class Program
                     // refreshes, so the extra reads carry no new information.
                     var repeats = samples.Zip(samples.Skip(1)).Count(pair => pair.First == pair.Second);
                     System.Console.WriteLine(
-                        $"  {orientationSamples} samples in {clock.Elapsed.TotalSeconds:F2}s = " +
-                        $"{orientationSamples / clock.Elapsed.TotalSeconds:F1} Hz, {clock.Elapsed.TotalMilliseconds / orientationSamples:F1} ms/read; " +
+                        $"  {gforceSamples} samples in {clock.Elapsed.TotalSeconds:F2}s = " +
+                        $"{gforceSamples / clock.Elapsed.TotalSeconds:F1} Hz, {clock.Elapsed.TotalMilliseconds / gforceSamples:F1} ms/read; " +
                         $"{repeats} identical to previous (calculated)");
 
                     // A single sample reading ~1 g proves nothing - a moving device crosses 1 g twice per
                     // oscillation - so this waits for consecutive samples to agree in direction too.
                     try
                     {
-                        var settled = await gmc.GetStableOrientationAsync(cancellationToken: cts.Token);
+                        var settled = await gmc.GetStableGForceAsync(cancellationToken: cts.Token);
                         System.Console.WriteLine(
                             $"  settled: X={settled.X} Y={settled.Y} Z={settled.Z}  =  " +
                             $"X={settled.XG:F4} Y={settled.YG:F4} Z={settled.ZG:F4}, |g|={settled.Magnitude:F4} (calculated, averaged)");
@@ -264,12 +285,12 @@ internal class Program
                     System.Console.WriteLine("  command       reply     min ms  median ms    mean ms   wire ms   min-wire   slow calls");
 
                     // Any --raw commands given replace the default set, so a single command can be isolated.
-                    var probes = rawCommands.Count > 0
+                    var benchmarkCommands = rawCommands.Count > 0
                         ? rawCommands.Select(r => (r.Command, r.Length)).ToArray()
                         : [("GETVOLT", 1), ("GETCPM", 2), ("GETTEMP", 4), ("GETGYRO", 7), ("GETVER", 14), ("GETCFG", 256)];
 
                     // 8N1 frames every byte as 10 bits, and the request is "<COMMAND>>" - command length plus 3.
-                    foreach (var (probe, replyBytes) in probes)
+                    foreach (var (probe, replyBytes) in benchmarkCommands)
                     {
                         var timings = new List<double>(benchmarkIterations);
                         for (var i = 0; i < benchmarkIterations; i++)
@@ -301,6 +322,34 @@ internal class Program
                         System.Console.WriteLine(
                             $"  {probe,-12} {replyBytes,6} {ordered[0],10:F2} {ordered[ordered.Count / 2],10:F2} " +
                             $"{ordered.Average(),10:F2} {wireMs,9:F2} {ordered[0] - wireMs,10:F2} {slow,12}");
+                    }
+                }
+
+                foreach (var (probeCommand, probeReplyBytes, gaps) in probes)
+                {
+                    System.Console.WriteLine();
+                    System.Console.WriteLine($"--- {probeCommand} minimum-interval probe (calculated) ---");
+                    System.Console.WriteLine("  A call taking >1s means the request landed too soon and was silently ignored until the");
+                    System.Console.WriteLine("  automatic retry; a fast call means the gap was long enough. 5 trials per candidate gap.");
+                    System.Console.WriteLine("  Uses SendRawAsync, bypassing any client-side throttle, so it measures the device itself.");
+                    System.Console.WriteLine();
+                    System.Console.WriteLine("  gap ms   fast   stalled   min ms    max ms");
+
+                    const int trialsPerGap = 5;
+                    foreach (var gap in gaps)
+                    {
+                        var elapsed = new List<double>(trialsPerGap);
+                        for (var trial = 0; trial < trialsPerGap; trial++)
+                        {
+                            if (gap > 0) await Task.Delay(gap, cts.Token);
+                            var clockProbe = System.Diagnostics.Stopwatch.StartNew();
+                            await gmc.SendRawAsync(probeCommand, probeReplyBytes, cts.Token);
+                            elapsed.Add(clockProbe.Elapsed.TotalMilliseconds);
+                        }
+
+                        var fast = elapsed.Count(ms => ms < 1000);
+                        System.Console.WriteLine(
+                            $"  {gap,6}   {fast,4}   {trialsPerGap - fast,7}   {elapsed.Min(),7:F1}   {elapsed.Max(),7:F1}");
                     }
                 }
 

@@ -49,10 +49,11 @@ impression was trusted. Raw bytes never lied. So:
 needed answering, and they are worth reusing:
 
 ```
---recent N       tail of the history log            --orientation N   accelerometer sample table
---raw CMD:BYTES  raw hex reply, repeatable          --benchmark N     per-command timing
---timeout MS     read timeout, to unmask stalls     --full-scan       walk the whole log (slow)
---key 0-3        simulate a button press
+--recent N              tail of the history log       --gforce N        accelerometer sample table
+--raw CMD:BYTES         raw hex reply, repeatable      --benchmark N     per-command timing
+--timeout MS            read timeout, to unmask stalls --full-scan       walk the whole log (slow)
+--key 0-3               simulate a button press
+--probe CMD:BYTES:GAPS  bisect a command's minimum polling interval, e.g. GETVOLT:1:0,1,10,50
 ```
 
 Only read commands are wired up. `SetDateTime`, `PowerOff/On`, `Reboot` and `FactoryReset`
@@ -63,13 +64,16 @@ once, and a demo people run casually should not be able to trigger that.
 
 Consult PROTOCOL-NOTES.md for detail, but be aware these exist:
 
-- **`GETCPM`** cannot be polled fast. A too-soon request is silently ignored and the retry
-  hides a full 5 s stall.
+- **`GETCPM`** used to be a trap: a too-soon request was silently ignored and the retry hid
+  a full 5 s stall. Now handled - `GetCpmAsync` enforces a 15 ms minimum gap internally
+  (`Gmc320sClient.MinCpmRequestGapMs`). If you ever suspect another command has the same
+  issue, bisect it with `--probe` before adding a gap on a guess; `GETVOLT` looked
+  suspicious from one benchmark run and turned out, on actual bisection, not to need one.
 - **`GETTEMP`** blocks ~170 ms for the sensor conversion and has two known-bad reply values,
   both rejected by `GetTemperatureCelsiusAsync`.
-- **`GETGYRO`** is an accelerometer, exposed as `GetOrientationAsync`. A single sample near
+- **`GETGYRO`** is an accelerometer, exposed as `GetGForceAsync`. A single sample near
   1 g does **not** mean the device is still - measured ~10% false positives under motion.
-  Use `GetStableOrientationAsync` when it matters.
+  Use `GetStableGForceAsync` when it matters.
 - **History log batch length is not constant** (0 to 182 observed). Never derive entry
   positions from an assumed cadence.
 - **µSv/h** comes from the device's own stored calibration, never a hardcoded sensitivity.

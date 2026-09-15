@@ -7,9 +7,9 @@ public sealed record GmcDeviceInfo(string? Version, string? SerialNumber);
 /// are accelerometer axes, not rotation rates, so a stationary device reports the gravity vector (1 g total)
 /// rather than zero - which makes it an orientation sensor in practice. Scale is <b>16384 counts per g</b>;
 /// divide by 16384.0 for g. The sensor is 12-bit left-shifted into 16 bits, so every value is a multiple of
-/// 16. See <see cref="Gmc320sClient.GetOrientationAsync"/> and PROTOCOL-NOTES.md.
+/// 16. See <see cref="Gmc320sClient.GetGForceAsync"/> and PROTOCOL-NOTES.md.
 /// </summary>
-public sealed record GmcOrientation(short X, short Y, short Z)
+public sealed record GmcGForce(short X, short Y, short Z)
 {
     /// <summary>Raw counts per g. The sensor is 12-bit left-shifted into 16 bits, so ±2 g spans the full range.</summary>
     public const double CountsPerG = 16384.0;
@@ -51,7 +51,7 @@ public sealed record GmcOrientation(short X, short Y, short Z)
     /// in ten chance of reading violent motion as a valid orientation. This property reliably rejects obvious
     /// motion but cannot confirm stillness on its own; to trust the axes, require several consecutive samples
     /// to agree in direction as well as magnitude, which is what
-    /// <see cref="Gmc320sClient.GetStableOrientationAsync"/> does.
+    /// <see cref="Gmc320sClient.GetStableGForceAsync"/> does.
     /// </remarks>
     public bool IsStable => IsStableWithin(DefaultStabilityTolerance);
 

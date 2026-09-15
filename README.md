@@ -29,7 +29,7 @@ The implementation is based on the current PyGMC open-source implementation. PyG
 - `GETVOLT`
 - `GETTEMP` (but see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETDATETIME` / `SETDATETIME`
-- `GETGYRO`, exposed as `GetOrientationAsync` since it reports an accelerometer rather than a rate gyroscope (see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
+- `GETGYRO`, exposed as `GetGForceAsync` since it reports an accelerometer rather than a rate gyroscope (see [Reading GETTEMP and GETGYRO](#reading-gettemp-and-getgyro))
 - `GETCFG` configuration readout, with the leading bytes parsed into `GmcConfig.Values` and the hardware-verified calibration table into `GmcConfig.Calibration` (raw 256-byte blob still available via `GmcConfig.Raw`)
 - CPM-to-µSv/h conversion from the device's own stored calibration (`GetMicroSievertsPerHourAsync`, `GmcCalibration`)
 - `GETSERIAL` device serial number
@@ -82,7 +82,7 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 
 - **Known-bad readings are rejected for you.** The sensor occasionally answers with an impossible "negative zero" (`00 00 01 AA` — sign flag set over zero magnitude, about once in thirty reads) or with 85.0 °C, the classic power-on-reset default of digital temperature sensors. `GetTemperatureCelsiusAsync` re-reads up to three times and throws `InvalidDataException` if every attempt is implausible, so these never reach you as a plausible-looking wrong number. Retrying costs nothing when the reading is genuine, since a good value passes on the first attempt. Otherwise consecutive reads are byte-identical — a value that disagrees with one taken moments earlier is thermal lag, not a bad read, and re-reading won't fix that.
 - **Readings run ~5-6 °C above room temperature.** That's self-heating inside a USB-powered enclosure, not a decode error. The encoding is plain binary and was verified as such: hand-warming produced `19 08` → `19 09` → `1A 00` (25.8 → 25.9 → 26.0 °C), and the nibble `A` in `0x1A` rules out the BCD reading that a naive ambient comparison would otherwise suggest.
-- **`GETGYRO` is an accelerometer, not a rate gyroscope — scale 16384 counts per g.** The values are the static gravity vector, so a stationary device reads 1 g total, not zero. Divide by `16384.0` for g. The API calls this `GetOrientationAsync`/`GmcOrientation`, naming it for what it measures rather than mirroring the misleading command name.
+- **`GETGYRO` is an accelerometer, not a rate gyroscope — scale 16384 counts per g.** The values are the static gravity vector, so a stationary device reads 1 g total, not zero. Divide by `16384.0` for g. The API calls this `GetGForceAsync`/`GmcGForce`, naming it for what it measures rather than mirroring the misleading command name.
 
   Six stationary samples make the scale exact. Every component is a multiple of 16, so the sensor is **12-bit left-shifted into a 16-bit field** (4096 effective steps over ±2 g) — that's what made the numbers look suspiciously round. After the shift Z lands on −1024 = −2¹⁰, i.e. −1 g. The clincher is the vector magnitude, which came to 0.991-1.020 g across all six: a stationary accelerometer *must* read 1 g since gravity never switches off, while a stationary gyroscope would read zero on every axis.
 
@@ -100,14 +100,14 @@ Both work on the GMC-320S, but their decoded values are easy to misread — this
 
   For coarse "which way is up" the shared scale is fine. For anything quantitative, apply per-axis gain and offset — and let the device sit still first, since readings taken while it's being handled drifted by as much as the effect being measured.
 
-  **Checking a reading is usable.** `GmcOrientation` exposes `XG`/`YG`/`ZG`, `Magnitude`, and `IsStable`. Magnitude must be 1 g on a motionless device at any orientation, so departures measure motion — below 1 g it is accelerating downward (0 g is free fall), above 1 g it is being accelerated or arrested.
+  **Checking a reading is usable.** `GmcGForce` exposes `XG`/`YG`/`ZG`, `Magnitude`, and `IsStable`. Magnitude must be 1 g on a motionless device at any orientation, so departures measure motion — below 1 g it is accelerating downward (0 g is free fall), above 1 g it is being accelerated or arrested.
 
   `IsStable` is **necessary but not sufficient**, and the failure rate is not small. A moving device sweeps *through* 1 g twice per oscillation, so samples caught at those crossings look perfectly still. In a 100-sample capture of the device being shaken hard enough to saturate the sensor, **10 samples passed `IsStable`** — a one-in-ten chance that a single poll reads violent motion as a valid orientation.
 
-  Use `GetStableOrientationAsync` when it matters. It waits for several consecutive samples to agree in *direction* as well as magnitude, throws `TimeoutException` if the device never settles, and returns their average, which also cancels the ~1% per-sample noise:
+  Use `GetStableGForceAsync` when it matters. It waits for several consecutive samples to agree in *direction* as well as magnitude, throws `TimeoutException` if the device never settles, and returns their average, which also cancels the ~1% per-sample noise:
 
   ```csharp
-  var settled = await gmc.GetStableOrientationAsync();   // 4 agreeing samples by default
+  var settled = await gmc.GetStableGForceAsync();   // 4 agreeing samples by default
   Console.WriteLine($"{settled.XG:F3}, {settled.YG:F3}, {settled.ZG:F3} g");
   ```
 
@@ -243,10 +243,15 @@ dotnet run --project .\src\Gmc320s.Console -- COM5 --benchmark 12
 # still/FALLING/ACCEL state per sample, then a settled average. Defaults to 100 samples;
 # |g| should read 1.000 on a still device, so it doubles as a calibration check.
 # Pass 0 to suppress the table.
-dotnet run --project .\src\Gmc320s.Console -- COM5 --orientation 50
+dotnet run --project .\src\Gmc320s.Console -- COM5 --gforce 50
 
 # Additionally walk the entire log and print every timestamp (one read per 4096 bytes, so slow)
 dotnet run --project .\src\Gmc320s.Console -- COM5 --full-scan
+
+# Bisect a command's minimum polling interval: COMMAND:REPLY_BYTES:comma,separated,gaps_ms.
+# This is how GETCPM's "never issue two requests with no yield in between" constraint
+# was found - see GetCpmAsync's XML doc and PROTOCOL-NOTES.md.
+dotnet run --project .\src\Gmc320s.Console -- COM5 --probe GETVOLT:1:0,1,5,10,25,50
 ```
 
 The app pauses on `Press any key to exit...` before closing, so the window stays open when launched from a debugger or by double-clicking the exe. It skips the pause automatically when input is redirected, so pipes and CI are unaffected.

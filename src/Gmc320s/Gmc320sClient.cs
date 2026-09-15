@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text;
 
 namespace Gmc320s;
@@ -82,15 +83,42 @@ public sealed class Gmc320sClient : IDisposable
     public async Task<string> GetVersionAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => Encoding.ASCII.GetString(_connection.Command("GETVER", 14)).Trim('\0', ' ', '\r', '\n'), cancellationToken);
 
-    /// <remarks>
-    /// Do not poll this in a tight loop. The device silently ignores a <c>GETCPM</c> that arrives too soon
-    /// after the previous one - measured at roughly a one-second minimum interval - so a rapid caller pays a
-    /// full read timeout on every reading. The automatic retry then succeeds, which hides the stall: 20
-    /// back-to-back calls cost about 5.1 seconds each. Space CPM reads about a second apart. See
+    /// <summary>
+    /// Minimum gap this client enforces between the end of one <c>GETCPM</c> reply and the start of the next
+    /// request. The device silently ignores a <c>GETCPM</c> that arrives with no gap at all - measured with a
+    /// bisected probe, zero-gap back-to-back calls failed roughly 80% of the time, while every gap of 1 ms or
+    /// more (up to 1100 ms tested) succeeded. 15 ms sits comfortably inside the validated-safe range rather
+    /// than at its edge: the 1 ms result came from only 5 trials, and <c>Task.Delay(1)</c> on Windows commonly
+    /// rounds up to the ~15 ms system timer tick anyway, so "1 ms" was not cleanly isolated from "15 ms" in
+    /// that test. 2-9 ms was never tested at all, and other platforms have finer timer resolution than
+    /// Windows, so a number picked at the very edge of one platform's noisy measurement would be a guess
+    /// wearing the clothes of a fact. 15 ms is imperceptible next to the ~5 s stall it prevents. See
     /// PROTOCOL-NOTES.md.
+    /// </summary>
+    public const int MinCpmRequestGapMs = 15;
+
+    private long _lastCpmReplyTimestamp = long.MinValue;
+
+    /// <remarks>
+    /// This client enforces <see cref="MinCpmRequestGapMs"/> automatically, sleeping first if a previous
+    /// <c>GETCPM</c> reply on this client arrived too recently. Without that, a caller polling in a tight loop
+    /// pays a full read timeout on every reading - the device discards the request but the automatic retry
+    /// then succeeds, so the multi-second stall is invisible unless timed. See PROTOCOL-NOTES.md.
     /// </remarks>
     public async Task<int> GetCpmAsync(CancellationToken cancellationToken = default)
-        => await ExecuteAsync(() => BinaryPrimitives.ReadUInt16BigEndian(_connection.Command("GETCPM", 2)), cancellationToken);
+        => await ExecuteAsync(() =>
+        {
+            if (_lastCpmReplyTimestamp != long.MinValue)
+            {
+                var sinceLastReply = Stopwatch.GetElapsedTime(_lastCpmReplyTimestamp);
+                if (sinceLastReply < TimeSpan.FromMilliseconds(MinCpmRequestGapMs))
+                    Thread.Sleep(TimeSpan.FromMilliseconds(MinCpmRequestGapMs) - sinceLastReply);
+            }
+
+            var cpm = BinaryPrimitives.ReadUInt16BigEndian(_connection.Command("GETCPM", 2));
+            _lastCpmReplyTimestamp = Stopwatch.GetTimestamp();
+            return cpm;
+        }, cancellationToken);
 
     public async Task<double> GetVoltageAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => _connection.Command("GETVOLT", 1)[0] / 10.0, cancellationToken);
@@ -188,11 +216,11 @@ public sealed class Gmc320sClient : IDisposable
     /// let the device settle first - readings taken while it is being handled drift substantially.
     /// </para>
     /// </remarks>
-    public async Task<GmcOrientation> GetOrientationAsync(CancellationToken cancellationToken = default)
+    public async Task<GmcGForce> GetGForceAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() =>
         {
             var b = _connection.Command("GETGYRO", 7);
-            return new GmcOrientation(BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(0, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(2, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(4, 2)));
+            return new GmcGForce(BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(0, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(2, 2)), BinaryPrimitives.ReadInt16BigEndian(b.AsSpan(4, 2)));
         }, cancellationToken);
 
     /// <summary>
@@ -200,26 +228,26 @@ public sealed class Gmc320sClient : IDisposable
     /// reading whose axes can actually be trusted as an orientation.
     /// </summary>
     /// <remarks>
-    /// <see cref="GmcOrientation.IsStable"/> on a single sample is necessary but <b>not sufficient</b>. A
+    /// <see cref="GmcGForce.IsStable"/> on a single sample is necessary but <b>not sufficient</b>. A
     /// moving device passes through 1 g magnitude twice per oscillation, so an unlucky single sample looks
     /// perfectly still: during a hand-shake capture, readings of 0.968 g and 1.036 g were taken while the
     /// device was being violently rotated. Only agreement across consecutive samples - in direction, not just
     /// magnitude - separates genuinely stationary from momentarily-passing-through.
     /// <para>
     /// The returned value is the mean of the qualifying window, which also averages out the ~1% per-sample
-    /// noise. It is therefore not necessarily a multiple of 16, unlike a raw <see cref="GetOrientationAsync"/>
+    /// noise. It is therefore not necessarily a multiple of 16, unlike a raw <see cref="GetGForceAsync"/>
     /// reading.
     /// </para>
     /// </remarks>
     /// <param name="consecutiveSamples">How many consecutive agreeing samples are required.</param>
-    /// <param name="toleranceG">How far each sample's magnitude may sit from 1 g. Defaults to <see cref="GmcOrientation.DefaultStabilityTolerance"/>, which is loose because the axes are unevenly trimmed.</param>
+    /// <param name="toleranceG">How far each sample's magnitude may sit from 1 g. Defaults to <see cref="GmcGForce.DefaultStabilityTolerance"/>, which is loose because the axes are unevenly trimmed.</param>
     /// <param name="agreementG">How far the samples may spread on any one axis. The default of 0.05 g sits well above the ~0.02 g spread of a motionless device and well below the ~0.16 g swing between consecutive samples of a moving one.</param>
     /// <param name="maxSamples">Give up after this many reads.</param>
     /// <param name="cancellationToken"></param>
     /// <exception cref="TimeoutException">The device did not hold still within <paramref name="maxSamples"/> reads.</exception>
-    public async Task<GmcOrientation> GetStableOrientationAsync(
+    public async Task<GmcGForce> GetStableGForceAsync(
         int consecutiveSamples = 4,
-        double toleranceG = GmcOrientation.DefaultStabilityTolerance,
+        double toleranceG = GmcGForce.DefaultStabilityTolerance,
         double agreementG = 0.05,
         int maxSamples = 40,
         CancellationToken cancellationToken = default)
@@ -229,11 +257,11 @@ public sealed class Gmc320sClient : IDisposable
         if (agreementG <= 0) throw new ArgumentOutOfRangeException(nameof(agreementG), "Must be positive.");
         if (maxSamples < consecutiveSamples) throw new ArgumentOutOfRangeException(nameof(maxSamples), "Must allow at least consecutiveSamples reads.");
 
-        var window = new List<GmcOrientation>(consecutiveSamples);
+        var window = new List<GmcGForce>(consecutiveSamples);
 
         for (var taken = 0; taken < maxSamples; taken++)
         {
-            var sample = await GetOrientationAsync(cancellationToken);
+            var sample = await GetGForceAsync(cancellationToken);
 
             // A sample nowhere near 1 g cannot belong to a stationary run at all, so the run restarts.
             if (!sample.IsStableWithin(toleranceG))
@@ -254,7 +282,7 @@ public sealed class Gmc320sClient : IDisposable
             $"{agreementG:F3} g per axis across {maxSamples} samples. Let it come to rest, or relax the thresholds.");
     }
 
-    private static bool AxesAgree(List<GmcOrientation> window, double agreementG) =>
+    private static bool AxesAgree(List<GmcGForce> window, double agreementG) =>
         Spread(window.Select(o => o.XG)) <= agreementG &&
         Spread(window.Select(o => o.YG)) <= agreementG &&
         Spread(window.Select(o => o.ZG)) <= agreementG;
@@ -265,7 +293,7 @@ public sealed class Gmc320sClient : IDisposable
         return list.Max() - list.Min();
     }
 
-    private static GmcOrientation Average(List<GmcOrientation> window) => new(
+    private static GmcGForce Average(List<GmcGForce> window) => new(
         (short)Math.Round(window.Average(o => (double)o.X)),
         (short)Math.Round(window.Average(o => (double)o.Y)),
         (short)Math.Round(window.Average(o => (double)o.Z)));
