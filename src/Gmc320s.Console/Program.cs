@@ -38,6 +38,8 @@ internal class Program
         var recentCount = 100;
         var orientationSamples = 100;
         var fullScan = false;
+        var benchmarkIterations = 0;
+        var timeoutMs = 5000;
         var rawCommands = new List<(string Command, int Length)>();
         var positional = new List<string>();
         for (var i = 0; i < args.Length; i++)
@@ -87,6 +89,26 @@ internal class Program
                 rawCommands.Add((spec[0], rawLength));
                 i++;
             }
+            else if (args[i] == "--benchmark")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out benchmarkIterations) || benchmarkIterations <= 0)
+                {
+                    System.Console.Error.WriteLine("Error: --benchmark requires a positive iteration count.");
+                    return 4;
+                }
+
+                i++;
+            }
+            else if (args[i] == "--timeout")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out timeoutMs) || timeoutMs <= 0)
+                {
+                    System.Console.Error.WriteLine("Error: --timeout requires a positive number of milliseconds.");
+                    return 4;
+                }
+
+                i++;
+            }
             else if (args[i] == "--full-scan")
             {
                 fullScan = true;
@@ -115,7 +137,7 @@ internal class Program
             if (port is not null)
             {
                 System.Console.WriteLine($"Connecting to GMC-320S on {port}...");
-                gmc = Gmc320sClient.Connect(port);
+                gmc = Gmc320sClient.Connect(port, timeoutMs: timeoutMs);
                 version = await gmc.GetVersionAsync(cts.Token);
             }
             else
@@ -225,6 +247,61 @@ internal class Program
                 {
                     var reply = await gmc.SendRawAsync(rawCommand, rawLength, cts.Token);
                     System.Console.WriteLine($"Raw <{rawCommand}>> -> {Convert.ToHexString(reply)}");
+                }
+
+                if (benchmarkIterations > 0)
+                {
+                    System.Console.WriteLine();
+                    System.Console.WriteLine($"--- Command timing, {benchmarkIterations} iterations each ---   all columns (calculated)");
+                    System.Console.WriteLine("  Overhead is the round trip minus the time the bytes themselves take on the wire. If it stays");
+                    System.Console.WriteLine("  flat as the reply grows, it is a fixed per-command cost (driver latency or device think time);");
+                    System.Console.WriteLine("  if it collapses for GETCFG, whose 256 bytes overrun the CH340's 64-byte buffer, then small");
+                    System.Console.WriteLine("  replies are simply waiting out a buffer-fill timeout - which is the only tunable case.");
+                    System.Console.WriteLine();
+                    System.Console.WriteLine("  Read min, not mean: a single retried read costs seconds and swamps an average, so the mean");
+                    System.Console.WriteLine("  measures the retry policy rather than the transport. Min is the honest floor.");
+                    System.Console.WriteLine();
+                    System.Console.WriteLine("  command       reply     min ms  median ms    mean ms   wire ms   min-wire   slow calls");
+
+                    // Any --raw commands given replace the default set, so a single command can be isolated.
+                    var probes = rawCommands.Count > 0
+                        ? rawCommands.Select(r => (r.Command, r.Length)).ToArray()
+                        : [("GETVOLT", 1), ("GETCPM", 2), ("GETTEMP", 4), ("GETGYRO", 7), ("GETVER", 14), ("GETCFG", 256)];
+
+                    // 8N1 frames every byte as 10 bits, and the request is "<COMMAND>>" - command length plus 3.
+                    foreach (var (probe, replyBytes) in probes)
+                    {
+                        var timings = new List<double>(benchmarkIterations);
+                        for (var i = 0; i < benchmarkIterations; i++)
+                        {
+                            var clockProbe = System.Diagnostics.Stopwatch.StartNew();
+                            try
+                            {
+                                await gmc.SendRawAsync(probe, replyBytes, cts.Token);
+                                timings.Add(clockProbe.Elapsed.TotalMilliseconds);
+                            }
+                            catch (TimeoutException)
+                            {
+                                timings.Add(double.PositiveInfinity);
+                            }
+                        }
+
+                        var ordered = timings.Where(double.IsFinite).Order().ToList();
+                        var wireMs = (replyBytes + probe.Length + 3) * 10 * 1000.0 / 115200;
+
+                        if (ordered.Count == 0)
+                        {
+                            System.Console.WriteLine($"  {probe,-12} {replyBytes,6}   every call failed");
+                            continue;
+                        }
+
+                        // Anything past ~10x the wire time has almost certainly absorbed a retry.
+                        var slow = timings.Count(t => !double.IsFinite(t) || t > wireMs * 10 + 50);
+
+                        System.Console.WriteLine(
+                            $"  {probe,-12} {replyBytes,6} {ordered[0],10:F2} {ordered[ordered.Count / 2],10:F2} " +
+                            $"{ordered.Average(),10:F2} {wireMs,9:F2} {ordered[0] - wireMs,10:F2} {slow,12}");
+                    }
                 }
 
                 System.Console.WriteLine();

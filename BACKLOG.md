@@ -15,6 +15,30 @@ Consider:
   GMC device should answer `GETVER` quickly; the long timeout is only needed for
   flaky-but-real connections during normal use).
 
+## Consider pacing or documenting GETCPM's minimum interval
+
+`GETCPM` silently ignores a request that arrives too soon after the previous one - see
+PROTOCOL-NOTES.md for the measurements. A caller polling it in a loop therefore pays a
+full read timeout on every reading (5 s by default) and never notices, because the
+automatic retry succeeds and returns a correct value.
+
+`GetCpmAsync` is fine for the paced, occasional use it was written for, and the console
+app only calls it a couple of times, so nothing is broken today. But the failure mode is
+silent and expensive, which is a poor trap to leave for someone building a CPM logger.
+
+Options, roughly in order of how much they presume:
+- Document the constraint on `GetCpmAsync` and leave behaviour alone. Cheapest, and
+  honest, since the exact minimum interval has not been measured.
+- Measure the actual minimum interval first (bisect the gap between calls until replies
+  stop arriving), then document a concrete figure rather than "about a second".
+- Have `GetCpmAsync` enforce a minimum spacing internally, sleeping if called too soon.
+  This trades a hidden 5 s stall for a visible short one, but it bakes in a guess about
+  the device's cadence and would surprise anyone who wants the raw behaviour.
+
+Note the same question has not been asked of the other commands. Only `GETGYRO` (12 ms)
+and `GETVER` (6 ms) are known to tolerate rapid repetition; `GETVOLT`, `GETTEMP`,
+`GETSERIAL` and `GETCFG` have not been tested for a minimum interval.
+
 ## Unexplained: reading counts don't reconcile with elapsed time around restarts
 
 A restart experiment (four power cycles at roughly 3, 2 and 1 minute intervals) confirmed

@@ -82,6 +82,13 @@ public sealed class Gmc320sClient : IDisposable
     public async Task<string> GetVersionAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => Encoding.ASCII.GetString(_connection.Command("GETVER", 14)).Trim('\0', ' ', '\r', '\n'), cancellationToken);
 
+    /// <remarks>
+    /// Do not poll this in a tight loop. The device silently ignores a <c>GETCPM</c> that arrives too soon
+    /// after the previous one - measured at roughly a one-second minimum interval - so a rapid caller pays a
+    /// full read timeout on every reading. The automatic retry then succeeds, which hides the stall: 20
+    /// back-to-back calls cost about 5.1 seconds each. Space CPM reads about a second apart. See
+    /// PROTOCOL-NOTES.md.
+    /// </remarks>
     public async Task<int> GetCpmAsync(CancellationToken cancellationToken = default)
         => await ExecuteAsync(() => BinaryPrimitives.ReadUInt16BigEndian(_connection.Command("GETCPM", 2)), cancellationToken);
 

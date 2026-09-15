@@ -234,6 +234,11 @@ dotnet run --project .\src\Gmc320s.Console -- COM5 --key 0
 # Show more of the newest readings (default 100) - reads only the tail of the log
 dotnet run --project .\src\Gmc320s.Console -- COM5 --recent 300
 
+# Time each command against its theoretical wire time. Reports the minimum, since one
+# retried call costs seconds and would swamp a mean. The overhead column shows how long
+# the device itself takes to answer.
+dotnet run --project .\src\Gmc320s.Console -- COM5 --benchmark 12
+
 # Loop the orientation sensor, printing raw counts, g per axis, vector magnitude and a
 # still/FALLING/ACCEL state per sample, then a settled average. Defaults to 100 samples;
 # |g| should read 1.000 on a still device, so it doubles as a calibration check.
